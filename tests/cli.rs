@@ -390,6 +390,57 @@ fn track_and_untrack_are_the_primary_names_with_add_and_remove_as_aliases() {
 }
 
 #[test]
+fn help_is_colored_like_jj_when_color_is_forced() {
+    const BOLD_YELLOW: &str = "\x1b[1m\x1b[33m";
+    const BOLD_GREEN: &str = "\x1b[1m\x1b[32m";
+    const GREEN: &str = "\x1b[32m";
+    let app = App::new(vec![]);
+    let help_for = |args: &[&str]| {
+        let output = app
+            .command(args)
+            .env("CLICOLOR_FORCE", "1")
+            .env_remove("NO_COLOR")
+            .output()
+            .unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    let help = help_for(&["--help"]);
+    assert!(help.contains(&format!("{BOLD_YELLOW}Usage:")), "{help:?}");
+    assert!(
+        help.contains(&format!("{BOLD_YELLOW}Commands:")),
+        "{help:?}"
+    );
+    assert!(help.contains(&format!("{BOLD_GREEN}track")), "{help:?}");
+    assert!(help.contains(&format!("{BOLD_GREEN}--help")), "{help:?}");
+
+    let help = help_for(&["track", "--help"]);
+    assert!(help.contains(&format!("{GREEN}<COURSE>")), "{help:?}");
+}
+
+#[test]
+fn help_stays_plain_when_piped_or_when_color_is_refused() {
+    let app = App::new(vec![]);
+    let piped = app
+        .command(&["--help"])
+        .env_remove("CLICOLOR_FORCE")
+        .env_remove("NO_COLOR")
+        .output()
+        .unwrap();
+    let refused = app
+        .command(&["--help"])
+        .env("CLICOLOR_FORCE", "1")
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    for output in [piped, refused] {
+        let help = String::from_utf8(output.stdout).unwrap();
+        assert!(help.contains("Usage:"), "{help:?}");
+        assert!(!help.contains('\x1b'), "{help:?}");
+    }
+}
+
+#[test]
 fn add_encodes_names_with_spaces() {
     let app = App::new(vec![search("Mathematik%202", 0, search_page(1, &[MATHE]))]);
     app.ok(&["add", "Mathematik 2"]);

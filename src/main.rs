@@ -12,6 +12,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, FixedOffset, Utc};
+use clap::builder::styling::{AnsiColor, Styles};
 use clap::{Parser, Subcommand};
 
 use domain::{
@@ -22,8 +23,15 @@ use tiss::Tiss;
 
 const DEFAULT_API_URL: &str = "https://tiss.tuwien.ac.at/api";
 
+/// The help colors of the jj CLI.
+const HELP_STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Yellow.on_default().bold())
+    .usage(AnsiColor::Yellow.on_default().bold())
+    .literal(AnsiColor::Green.on_default().bold())
+    .placeholder(AnsiColor::Green.on_default());
+
 #[derive(Parser)]
-#[command(name = "tiss", version, about)]
+#[command(name = "tiss", version, about, styles = HELP_STYLES)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
