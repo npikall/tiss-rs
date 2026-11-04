@@ -7,6 +7,7 @@ mod tiss;
 
 use std::env;
 use std::io::{self, IsTerminal};
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -59,6 +60,9 @@ enum Command {
         /// Fetch exams from TISS even if the stored ones are recent
         #[arg(long)]
         refresh: bool,
+        /// Show at most this many exams, the soonest ones
+        #[arg(short = 'n', long, value_name = "COUNT")]
+        limit: Option<NonZeroUsize>,
     },
 }
 
@@ -82,7 +86,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             courses.iter().for_each(|c| println!("{c}"));
             Ok(ExitCode::SUCCESS)
         }
-        Command::List { refresh } => app.list(refresh),
+        Command::List { refresh, limit } => app.list(refresh, limit),
     }
 }
 
@@ -190,7 +194,7 @@ impl App {
     }
 
     /// Reports every course it could not fetch, and still shows the exams of the others.
-    fn list(&mut self, refresh: bool) -> Result<ExitCode> {
+    fn list(&mut self, refresh: bool, limit: Option<NonZeroUsize>) -> Result<ExitCode> {
         let courses = self.store.tracked_courses()?;
         if courses.is_empty() {
             println!("no courses tracked yet, start with: tiss track <course>");
@@ -207,7 +211,8 @@ impl App {
                 }
             }
         }
-        let rows = upcoming(exams, self.now);
+        let mut rows = upcoming(exams, self.now);
+        rows.truncate(limit.map_or(usize::MAX, NonZeroUsize::get));
         if rows.is_empty() {
             println!("no upcoming exams");
         } else {

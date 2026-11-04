@@ -17,6 +17,7 @@ tiss track 104.299              # track by course number
 tiss track "Analysis für Inf"   # track by part of the name
 tiss courses                    # show tracked courses
 tiss list                       # upcoming exams and registration deadlines, soonest first
+tiss ls -n5                     # only the five soonest exams
 tiss untrack 104.299            # stop tracking
 ```
 

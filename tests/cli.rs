@@ -540,6 +540,43 @@ TBA               2099-05-03 10:00           104.299 VO Mathematik 2 für MB
     assert_eq!(app.ok(&["list"]), expected);
 }
 
+fn tracked_mathe_with_three_upcoming_exams() -> App {
+    let app = App::new(vec![
+        search("104299", 0, search_page(1, &[MATHE])),
+        exams("104299", 200, EXAMS),
+    ]);
+    app.ok(&["add", "104299"]);
+    app
+}
+
+#[test]
+fn list_limit_shows_only_the_soonest_exams() {
+    let app = tracked_mathe_with_three_upcoming_exams();
+    let expected = "\
+Exam date         Register by                Course
+2099-01-08 14:00  2000-01-06 10:00 (closed)  104.299 VO Mathematik 2 für MB
+2099-03-05 14:00  2099-03-03 10:00           104.299 VO Mathematik 2 für MB
+";
+    assert_eq!(app.ok(&["ls", "-n2"]), expected);
+    assert_eq!(app.ok(&["list", "--limit", "2"]), expected);
+}
+
+#[test]
+fn list_limit_above_the_number_of_exams_shows_them_all() {
+    let app = tracked_mathe_with_three_upcoming_exams();
+    assert_eq!(app.ok(&["ls", "-n99"]), app.ok(&["ls"]));
+}
+
+#[test]
+fn list_limit_must_be_a_positive_number() {
+    let app = tracked_mathe_with_three_upcoming_exams();
+    for limit in ["-n0", "-nfive", "-n-1"] {
+        let output = app.tiss(&["ls", limit]);
+        assert!(!output.status.success(), "{limit} was accepted");
+        assert!(stderr(&output).contains("--limit"), "{limit}");
+    }
+}
+
 const COURSE_NAME: &str = "VO Mathematik 2 für MB";
 
 #[test]
