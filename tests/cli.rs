@@ -216,6 +216,179 @@ fn add_by_ambiguous_name_lists_candidates_and_tracks_nothing() {
     assert_eq!(app.ok(&["courses"]), "");
 }
 
+const MATHE_VO: &str = "104.299 VO Mathematik 2 für MB\n";
+const MATHE_UE: &str = "104.606 UE Mathematik 2 für MB\n";
+
+fn three_mathematik_courses() -> App {
+    App::new(vec![search(
+        "Mathematik",
+        0,
+        search_page(
+            3,
+            &[
+                MATHE,
+                "104.606 UE Mathematik 2 für MB, 2027S",
+                "104.700 VU Mathematik 3, 2027S",
+            ],
+        ),
+    )])
+}
+
+/// Runs in a real pseudo-terminal: waits for the picker, presses `keys`, returns all it printed.
+#[cfg(unix)]
+fn in_terminal(app: &App, args: &[&str], keys: &str) -> String {
+    let mut terminal = rexpect::session::spawn_command(app.command(args), Some(10_000)).unwrap();
+    terminal.exp_string("selected").unwrap();
+    terminal.send(keys).unwrap();
+    terminal.flush().unwrap();
+    // rexpect turns each byte into one char, which breaks anything beyond ASCII.
+    let bytes = terminal
+        .exp_eof()
+        .unwrap()
+        .chars()
+        .map(|c| c as u8)
+        .collect();
+    String::from_utf8(bytes).unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn track_offers_every_candidate_and_tracks_the_one_checked() {
+    let app = three_mathematik_courses();
+    let printed = in_terminal(&app, &["track", "Mathematik"], "j c");
+    assert!(
+        printed.contains("[ ] 104.299 VO Mathematik 2 für MB"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("(●) 104.606 UE Mathematik 2 für MB"),
+        "{printed}"
+    );
+    assert!(printed.contains("[ ] 104.700 VU Mathematik 3"), "{printed}");
+    assert!(printed.contains("now tracking 104.606"), "{printed}");
+    assert_eq!(app.ok(&["courses"]), MATHE_UE);
+}
+
+#[cfg(unix)]
+#[test]
+fn track_tracks_several_checked_courses_and_reports_each() {
+    let app = three_mathematik_courses();
+    let printed = in_terminal(&app, &["track", "Mathematik"], "\r\rc");
+    assert!(printed.contains("now tracking 104.299"), "{printed}");
+    assert!(printed.contains("now tracking 104.606"), "{printed}");
+    assert_eq!(app.ok(&["courses"]), format!("{MATHE_VO}{MATHE_UE}"));
+}
+
+#[cfg(unix)]
+#[test]
+fn track_says_which_checked_courses_were_already_tracked() {
+    let app = three_mathematik_courses();
+    in_terminal(&app, &["track", "Mathematik"], " c");
+    let printed = in_terminal(&app, &["track", "Mathematik"], "\r c");
+    assert!(printed.contains("already tracking 104.299"), "{printed}");
+    assert!(printed.contains("now tracking 104.606"), "{printed}");
+}
+
+#[cfg(unix)]
+#[test]
+fn track_quit_tracks_nothing_even_with_courses_checked_and_restores_the_terminal() {
+    let app = three_mathematik_courses();
+    let printed = in_terminal(&app, &["track", "Mathematik"], " q");
+    assert!(printed.contains("nothing tracked"), "{printed}");
+    assert!(
+        printed.contains("\x1b[?1049l"),
+        "alternate screen left: {printed:?}"
+    );
+    assert!(
+        printed.contains("\x1b[?25h"),
+        "cursor shown again: {printed:?}"
+    );
+    assert_eq!(app.ok(&["courses"]), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn track_confirming_with_nothing_checked_tracks_nothing() {
+    let app = three_mathematik_courses();
+    let printed = in_terminal(&app, &["track", "Mathematik"], "c");
+    assert!(printed.contains("nothing tracked"), "{printed}");
+    assert_eq!(app.ok(&["courses"]), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn untrack_without_argument_offers_all_tracked_and_removes_the_checked() {
+    let app = three_mathematik_courses();
+    in_terminal(&app, &["track", "Mathematik"], "\r\rc");
+    let printed = in_terminal(&app, &["untrack"], "j c");
+    assert!(printed.contains("removed 104.606"), "{printed}");
+    assert_eq!(app.ok(&["courses"]), MATHE_VO);
+}
+
+#[cfg(unix)]
+#[test]
+fn untrack_without_argument_prompts_for_a_single_tracked_course_too() {
+    let app = three_mathematik_courses();
+    in_terminal(&app, &["track", "Mathematik"], " c");
+    let printed = in_terminal(&app, &["untrack"], " c");
+    assert!(printed.contains("removed 104.299"), "{printed}");
+    assert_eq!(app.ok(&["courses"]), "");
+}
+
+#[cfg(unix)]
+#[test]
+fn untrack_with_a_name_matching_several_offers_only_those() {
+    let app = three_mathematik_courses();
+    in_terminal(&app, &["track", "Mathematik"], "Ac");
+    let printed = in_terminal(&app, &["rm", "Mathematik 2"], " c");
+    assert!(printed.contains("104.606"), "{printed}");
+    assert!(!printed.contains("104.700"), "{printed}");
+    assert!(printed.contains("removed 104.299"), "{printed}");
+    assert_eq!(app.ok(&["courses"]).lines().count(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn untrack_quit_removes_nothing() {
+    let app = three_mathematik_courses();
+    in_terminal(&app, &["track", "Mathematik"], "Ac");
+    let printed = in_terminal(&app, &["untrack"], " q");
+    assert!(printed.contains("nothing removed"), "{printed}");
+    assert_eq!(app.ok(&["courses"]).lines().count(), 3);
+}
+
+#[test]
+fn untrack_without_argument_or_terminal_lists_tracked_and_removes_nothing() {
+    let app = App::new(vec![search("104299", 0, search_page(1, &[MATHE]))]);
+    app.ok(&["track", "104299"]);
+    assert!(app.err(&["untrack"]).contains("104.299"));
+    assert_eq!(app.ok(&["courses"]), MATHE_VO);
+}
+
+#[test]
+fn untrack_without_argument_and_nothing_tracked_does_not_prompt() {
+    let app = App::new(vec![]);
+    assert!(app.ok(&["untrack"]).contains("not tracked"));
+}
+
+#[test]
+fn track_and_untrack_are_the_primary_names_with_add_and_remove_as_aliases() {
+    let app = App::new(vec![search("104299", 0, search_page(1, &[MATHE]))]);
+    assert!(app.ok(&["track", "104299"]).contains("now tracking"));
+    assert!(app.ok(&["untrack", "104299"]).contains("removed"));
+    assert!(app.ok(&["add", "104299"]).contains("now tracking"));
+    assert!(app.ok(&["remove", "104299"]).contains("removed"));
+    let help = app.ok(&["--help"]);
+    for line in ["track", "untrack"] {
+        assert!(
+            help.lines().any(|l| l.trim_start().starts_with(line)),
+            "{help}"
+        );
+    }
+    assert!(help.contains("[alias: add]"), "{help}");
+    assert!(help.contains("[aliases: remove, rm]"), "{help}");
+}
+
 #[test]
 fn add_encodes_names_with_spaces() {
     let app = App::new(vec![search("Mathematik%202", 0, search_page(1, &[MATHE]))]);
@@ -290,7 +463,7 @@ fn list_treats_no_exam_dates_as_empty_not_failure() {
 #[test]
 fn list_with_nothing_tracked_says_how_to_start() {
     let app = App::new(vec![]);
-    assert!(app.ok(&["list"]).contains("tiss add"));
+    assert!(app.ok(&["list"]).contains("tiss track"));
     assert!(app.requests().is_empty());
 }
 

@@ -1,14 +1,16 @@
 //! Track TU Wien courses and see their exam dates and registration deadlines.
 
 mod domain;
+mod picker;
 mod store;
 mod tiss;
 
 use std::env;
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context, Error, Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, FixedOffset, Utc};
 use clap::{Parser, Subcommand};
 
@@ -30,15 +32,16 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Start tracking a course, by number (104.299) or by part of its name
-    Add {
+    #[command(visible_alias = "add")]
+    Track {
         course: CourseQuery,
         /// Ask TISS even if the course is already known this semester
         #[arg(long)]
         refresh: bool,
     },
-    /// Stop tracking a course, by number or by part of its name
-    #[command(visible_alias = "rm")]
-    Remove { course: CourseQuery },
+    /// Stop tracking a course, by number or by part of its name, or choose from a list
+    #[command(visible_aliases = ["remove", "rm"])]
+    Untrack { course: Option<CourseQuery> },
     /// Show the tracked courses
     Courses,
     /// Show upcoming exams of tracked courses with their registration deadlines
@@ -63,8 +66,8 @@ fn run(cli: Cli) -> Result<ExitCode> {
     let tiss = Tiss::new(env::var("TISS_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.into()));
     let mut app = App { store, tiss, now };
     match cli.command {
-        Command::Add { course, refresh } => app.add(&course, refresh),
-        Command::Remove { course } => app.remove(&course),
+        Command::Track { course, refresh } => app.track(&course, refresh),
+        Command::Untrack { course } => app.untrack(course.as_ref()),
         Command::Courses => {
             let courses = app.store.tracked_courses()?;
             courses.iter().for_each(|c| println!("{c}"));
@@ -98,16 +101,21 @@ struct App {
 }
 
 impl App {
-    fn add(&mut self, query: &CourseQuery, refresh: bool) -> Result<ExitCode> {
-        let course = match resolve(query, self.courses_matching(query, refresh)?) {
-            Resolution::Found(course) => course,
+    fn track(&mut self, query: &CourseQuery, refresh: bool) -> Result<ExitCode> {
+        let courses = match resolve(query, self.courses_matching(query, refresh)?) {
+            Resolution::Found(course) => vec![course],
             Resolution::NotFound => return Err(anyhow!("no course matches \"{query}\"")),
-            Resolution::Ambiguous(candidates) => return Err(ambiguous(query, &candidates)),
+            Resolution::Ambiguous(candidates) => select(&matches_several(query), &candidates)?,
         };
-        if self.store.track(&course)? {
-            println!("now tracking {course}");
-        } else {
-            println!("already tracking {course}");
+        if courses.is_empty() {
+            println!("nothing tracked");
+        }
+        for course in courses {
+            if self.store.track(&course)? {
+                println!("now tracking {course}");
+            } else {
+                println!("already tracking {course}");
+            }
         }
         Ok(ExitCode::SUCCESS)
     }
@@ -126,16 +134,29 @@ impl App {
         Ok(found)
     }
 
-    fn remove(&mut self, query: &CourseQuery) -> Result<ExitCode> {
-        match resolve(query, self.store.tracked_courses()?) {
-            Resolution::Found(course) => {
-                self.store.untrack(&course.number)?;
-                println!("removed {course}");
+    /// Without a query every tracked course is a candidate.
+    fn untrack(&mut self, query: Option<&CourseQuery>) -> Result<ExitCode> {
+        let tracked = self.store.tracked_courses()?;
+        let resolution = match query {
+            Some(query) => resolve(query, tracked),
+            None if tracked.is_empty() => Resolution::NotFound,
+            None => Resolution::Ambiguous(tracked),
+        };
+        let title = query.map_or("Choose courses to stop tracking".into(), matches_several);
+        let courses = match resolution {
+            Resolution::Found(course) => vec![course],
+            Resolution::NotFound => {
+                println!("not tracked, nothing to remove");
+                return Ok(ExitCode::SUCCESS);
             }
-            Resolution::NotFound => println!("not tracked, nothing to remove"),
-            Resolution::Ambiguous(candidates) => {
-                return Err(ambiguous(query, &candidates));
-            }
+            Resolution::Ambiguous(candidates) => select(&title, &candidates)?,
+        };
+        if courses.is_empty() {
+            println!("nothing removed");
+        }
+        for course in courses {
+            self.store.untrack(&course.number)?;
+            println!("removed {course}");
         }
         Ok(ExitCode::SUCCESS)
     }
@@ -144,7 +165,7 @@ impl App {
     fn list(&mut self, refresh: bool) -> Result<ExitCode> {
         let courses = self.store.tracked_courses()?;
         if courses.is_empty() {
-            println!("no courses tracked yet, start with: tiss add <course>");
+            println!("no courses tracked yet, start with: tiss track <course>");
             return Ok(ExitCode::SUCCESS);
         }
         let mut exams = Vec::new();
@@ -177,10 +198,21 @@ impl App {
     }
 }
 
-fn ambiguous(query: &CourseQuery, candidates: &[Course]) -> Error {
-    let list: Vec<String> = candidates.iter().map(|c| format!("  {c}")).collect();
-    anyhow!(
-        "\"{query}\" matches several courses, use the number:\n{}",
-        list.join("\n")
-    )
+/// Lets the user check courses in a picker. Without a terminal, such as in a script, nobody can
+/// answer, so this fails and lists the candidates instead.
+fn select(title: &str, candidates: &[Course]) -> Result<Vec<Course>> {
+    if !(io::stdin().is_terminal() && io::stderr().is_terminal()) {
+        let list: Vec<String> = candidates.iter().map(|c| format!("  {c}")).collect();
+        return Err(anyhow!(
+            "{title}, but there is no terminal to ask in, use a course number:\n{}",
+            list.join("\n")
+        ));
+    }
+    let labels = candidates.iter().map(Course::to_string).collect();
+    let checked = picker::ask(title, labels)?;
+    Ok(checked.iter().map(|&i| candidates[i].clone()).collect())
+}
+
+fn matches_several(query: &CourseQuery) -> String {
+    format!("\"{query}\" matches several courses")
 }

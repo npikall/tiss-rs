@@ -13,15 +13,29 @@ cargo install --path .
 ## Usage
 
 ```bash
-tiss add 104.299              # track by course number
-tiss add "Analysis für Inf"   # track by part of the name
-tiss courses                  # show tracked courses
-tiss list                     # upcoming exams and registration deadlines, soonest first
-tiss remove 104.299           # stop tracking
+tiss track 104.299              # track by course number
+tiss track "Analysis für Inf"   # track by part of the name
+tiss courses                    # show tracked courses
+tiss list                       # upcoming exams and registration deadlines, soonest first
+tiss untrack 104.299            # stop tracking
 ```
 
-A name matching several courses lists them and tracks nothing; run `tiss add` again with the
-number.
+`add` still works for `track`, and `remove` and `rm` for `untrack`.
+
+When a name matches several courses, a checkbox list asks which you mean. `tiss untrack` without
+an argument asks the same about every tracked course. The keys are those of `jj restore -i`:
+
+| Key | Action |
+| --- | --- |
+| `↑` `↓` `k` `j`, `PgUp` `PgDn` | move |
+| `space` | toggle |
+| `enter` | toggle and move down |
+| `a` / `A` | invert / toggle all |
+| `c` | confirm |
+| `q`, `Esc`, `Ctrl-C` | quit without changing anything |
+
+Without a terminal, as in a script, it fails, lists the candidates and changes nothing; use the
+number instead.
 
 ## Storage
 
@@ -34,6 +48,6 @@ overrides it), which keeps requests to TISS down:
 - Exams can change at any time, so `tiss list` fetches them again once the stored ones are an hour
   old.
 
-`tiss add --refresh` and `tiss list --refresh` ask TISS regardless.
+`tiss track --refresh` and `tiss list --refresh` ask TISS regardless.
 
 An existing `tracked.json` is imported on the first run and renamed to `tracked.json.imported`.

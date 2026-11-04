@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1.0.104"
 chrono = { version = "0.4.45", default-features = false, features = ["now", "serde", "std"] }
 clap = { version = "4.6.7", features = ["derive"] }
+crossterm = "0.29"
 dirs = "7.0.0"
 quick-xml = { version = "0.42.0", features = ["serialize"] }
 rusqlite = { version = "0.41.1", features = ["bundled", "chrono"] }
@@ -20,3 +21,6 @@ tempfile = "3.27.0"
 [[bin]]
 name = "tiss"
 path = "src/main.rs"
+
+[target.'cfg(unix)'.dev-dependencies]
+rexpect = "0.7.1"
