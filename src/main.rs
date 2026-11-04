@@ -13,7 +13,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, FixedOffset, Utc};
-use clap::builder::styling::{AnsiColor, Styles};
+use clap::builder::styling::{AnsiColor, Style, Styles};
 use clap::{Parser, Subcommand};
 
 use domain::{
@@ -25,15 +25,23 @@ use tiss::Tiss;
 
 const DEFAULT_API_URL: &str = "https://tiss.tuwien.ac.at/api";
 
+/// The color of what a user types, in the help of the jj CLI.
+const LITERAL: Style = AnsiColor::Green.on_default().bold();
+
 /// The help colors of the jj CLI.
 const HELP_STYLES: Styles = Styles::styled()
     .header(HEADING)
     .usage(HEADING)
-    .literal(AnsiColor::Green.on_default().bold())
+    .literal(LITERAL)
     .placeholder(AnsiColor::Green.on_default());
 
+/// Track TU Wien courses and see their exam dates and registration deadlines
+///
+/// Everything is kept in a SQLite database, which keeps requests to TISS down.
+///
+/// Run `tiss <COMMAND> --help` for the details of a command.
 #[derive(Parser)]
-#[command(name = "tiss", version, about, styles = HELP_STYLES)]
+#[command(name = "tiss", version, styles = HELP_STYLES, after_long_help = environment_help())]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -41,29 +49,110 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Start tracking a course, by number (104.299) or by part of its name
-    #[command(visible_alias = "add")]
+    /// Start tracking a course
+    ///
+    /// When a name matches several courses, a checkbox list asks which you mean. Without a
+    /// terminal, as in a script, nobody can answer: the command fails, lists the candidates and
+    /// tracks nothing.
+    ///
+    /// Courses do not change within a semester, so TISS is asked about each course or search once
+    /// per semester. A search that found nothing is asked again.
+    #[command(visible_alias = "add", after_long_help = environment_help())]
     Track {
+        /// Course number or part of the name, such as 104.299 or "Analysis für Inf"
+        ///
+        /// A course no longer offered can only be found by its number.
         course: CourseQuery,
         /// Ask TISS even if the course is already known this semester
         #[arg(long)]
         refresh: bool,
     },
-    /// Stop tracking a course, by number or by part of its name, or choose from a list
-    #[command(visible_aliases = ["remove", "rm"])]
-    Untrack { course: Option<CourseQuery> },
+    /// Stop tracking a course
+    ///
+    /// When a name matches several tracked courses, a checkbox list asks which you mean. Without a
+    /// terminal, as in a script, nobody can answer: the command fails, lists the candidates and
+    /// removes nothing.
+    ///
+    /// This only changes the local database and never asks TISS.
+    #[command(visible_aliases = ["remove", "rm"], after_long_help = environment_help())]
+    Untrack {
+        /// Course number or part of the name
+        ///
+        /// Without a course, the checkbox list offers every tracked course.
+        course: Option<CourseQuery>,
+    },
     /// Show the tracked courses
+    ///
+    /// This only reads the local database and never asks TISS.
+    #[command(after_long_help = environment_help())]
     Courses,
     /// Show upcoming exams of tracked courses with their registration deadlines
-    #[command(visible_alias = "ls")]
+    ///
+    /// Exams are sorted soonest first. They can change at any time, so they are fetched from TISS
+    /// again once the stored ones are an hour old.
+    ///
+    /// In a terminal the table has colors and cuts long course names to fit its width. Piped
+    /// output stays plain and keeps them whole.
+    ///
+    /// A course that cannot be fetched is reported, the exams of the others are still shown, and
+    /// the exit status is nonzero.
+    #[command(visible_alias = "ls", after_long_help = environment_help())]
     List {
         /// Fetch exams from TISS even if the stored ones are recent
         #[arg(long)]
         refresh: bool,
         /// Show at most this many exams, the soonest ones
+        ///
+        /// At least 1.
         #[arg(short = 'n', long, value_name = "COUNT")]
         limit: Option<NonZeroUsize>,
     },
+}
+
+/// Written out here, since clap only documents environment variables that set an argument.
+fn environment_help() -> String {
+    let variables = [
+        (
+            "TISS_DATA_DIR",
+            "Directory of the database. Defaults to `tiss` in the user data directory:\n\
+             $XDG_DATA_HOME or ~/.local/share on Linux, ~/Library/Application Support on\n\
+             macOS, %APPDATA% on Windows.",
+        ),
+        (
+            "TISS_API_URL",
+            &format!("Base URL of the TISS API. Defaults to {DEFAULT_API_URL}."),
+        ),
+        (
+            "TISS_NOW",
+            "Pretend it is this time, in RFC 3339 such as 2026-11-04T12:00:00+01:00. Meant\n\
+             for testing. Any other value makes every command fail.",
+        ),
+        ("NO_COLOR", "When not empty, turns off all colors."),
+        (
+            "CLICOLOR_FORCE",
+            "When not empty, colors this help even when piped, unless NO_COLOR is set.\n\
+             The table of `tiss list` ignores it.",
+        ),
+        (
+            "ALL_PROXY, HTTPS_PROXY, HTTP_PROXY",
+            "Sends requests to TISS through this proxy. The first one set wins, in this\n\
+             order. The lowercase names work too.",
+        ),
+        (
+            "NO_PROXY",
+            "Hosts to reach without the proxy, separated by commas.",
+        ),
+    ];
+    let mut help = format!("{HEADING}Environment variables:{HEADING:#}\n");
+    for (name, description) in variables {
+        help += &format!("  {LITERAL}{name}{LITERAL:#}\n");
+        for line in description.lines() {
+            help += &format!("          {line}\n");
+        }
+        help += "\n";
+    }
+    help.truncate(help.trim_end().len());
+    help
 }
 
 fn main() -> ExitCode {

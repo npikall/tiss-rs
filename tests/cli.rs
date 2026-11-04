@@ -483,6 +483,85 @@ fn help_stays_plain_when_piped_or_when_color_is_refused() {
     }
 }
 
+/// What a user reads after `--help`, per command.
+const LONG_HELP: [(&[&str], &[&str]); 5] = [
+    (&["--help"], &["SQLite database", "tiss <COMMAND> --help"]),
+    (
+        &["track", "--help"],
+        &[
+            "once per semester",
+            "no longer offered",
+            "Without a terminal",
+            "Course number or part of the name",
+        ],
+    ),
+    (
+        &["untrack", "--help"],
+        &["Without a course", "Without a terminal", "never asks TISS"],
+    ),
+    (&["courses", "--help"], &["never asks TISS"]),
+    (
+        &["list", "--help"],
+        &["an hour", "exit status", "piped", "At least 1"],
+    ),
+];
+
+#[test]
+fn long_help_explains_each_command_and_every_environment_variable() {
+    let app = App::new(vec![]);
+    for (args, explanations) in LONG_HELP {
+        // Wrapping depends on the width, so compare without line breaks.
+        let help = app
+            .ok(args)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for expected in explanations.iter().chain(&[
+            "Environment variables:",
+            "TISS_DATA_DIR",
+            "XDG_DATA_HOME",
+            "TISS_API_URL",
+            "https://tiss.tuwien.ac.at/api",
+            "TISS_NOW",
+            "NO_COLOR",
+            "CLICOLOR_FORCE",
+            "ALL_PROXY",
+            "HTTPS_PROXY",
+            "HTTP_PROXY",
+            "NO_PROXY",
+        ]) {
+            assert!(help.contains(expected), "{args:?} lacks {expected}: {help}");
+        }
+    }
+}
+
+#[test]
+fn short_help_stays_a_summary_that_points_to_the_long_one() {
+    let app = App::new(vec![]);
+    for args in [&["-h"][..], &["track", "-h"], &["list", "-h"]] {
+        let help = app.ok(args);
+        assert!(!help.contains("TISS_DATA_DIR"), "{args:?}: {help}");
+        assert!(help.contains("see more with '--help'"), "{args:?}: {help}");
+    }
+    assert!(app.ok(&["-h"]).contains("Track TU Wien courses"));
+}
+
+#[test]
+fn environment_section_is_colored_like_the_rest_of_the_help() {
+    let output = App::new(vec![])
+        .command(&["--help"])
+        .env("CLICOLOR_FORCE", "1")
+        .env_remove("NO_COLOR")
+        .output()
+        .unwrap();
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        help.contains("\x1b[1m\x1b[33mEnvironment variables:"),
+        "{help:?}"
+    );
+    assert!(help.contains("\x1b[1m\x1b[32mTISS_DATA_DIR"), "{help:?}");
+}
+
 #[test]
 fn add_encodes_names_with_spaces() {
     let app = App::new(vec![search("Mathematik%202", 0, search_page(1, &[MATHE]))]);

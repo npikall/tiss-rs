@@ -41,6 +41,21 @@ an argument asks the same about every tracked course. The keys are those of `jj 
 Without a terminal, as in a script, it fails, lists the candidates and changes nothing; use the
 number instead.
 
+`tiss --help` and `tiss <command> --help` explain each command and these environment variables;
+`-h` shows a summary.
+
+## Environment variables
+
+| Variable | Effect |
+| --- | --- |
+| `TISS_DATA_DIR` | Directory of the database. Defaults to `tiss` in the user data directory: `$XDG_DATA_HOME` or `~/.local/share` on Linux, `~/Library/Application Support` on macOS, `%APPDATA%` on Windows. |
+| `TISS_API_URL` | Base URL of the TISS API. Defaults to `https://tiss.tuwien.ac.at/api`. |
+| `TISS_NOW` | Pretend it is this time, in RFC 3339 such as `2026-11-04T12:00:00+01:00`. Meant for testing. Any other value makes every command fail. |
+| `NO_COLOR` | When not empty, turns off all colors. |
+| `CLICOLOR_FORCE` | When not empty, colors the help even when piped, unless `NO_COLOR` is set. The table of `tiss list` ignores it. |
+| `ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY` | Sends requests to TISS through this proxy. The first one set wins, in this order. The lowercase names work too. |
+| `NO_PROXY` | Hosts to reach without the proxy, separated by commas. |
+
 ## Storage
 
 Everything lives in the SQLite database `tiss.db` in the user data directory (`TISS_DATA_DIR`
