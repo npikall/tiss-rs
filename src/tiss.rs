@@ -159,6 +159,8 @@ struct ExamList {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ExamEntry {
+    #[serde(rename = "@id")]
+    id: i64,
     title: String,
     examination_begin: Option<DateTime<FixedOffset>>,
     application_end: Option<DateTime<FixedOffset>>,
@@ -186,6 +188,7 @@ fn parse_course(number: &CourseNumber, xml: &str) -> Result<Course> {
 fn parse_exams(xml: &str) -> Result<Vec<Exam>> {
     let list: ExamList = quick_xml::de::from_str(xml)?;
     let exams = list.exam.into_iter().map(|entry| Exam {
+        id: entry.id,
         title: entry.title,
         begins: entry.examination_begin,
         registration_end: entry.application_end,

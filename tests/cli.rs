@@ -1158,3 +1158,239 @@ fn a_name_search_without_a_match_points_to_the_course_number() {
     assert!(message.contains("no course matches"), "{message}");
     assert!(message.contains("course number"), "{message}");
 }
+
+const SECOND_COURSE: &str = "104.606 VO Physik, 2027S";
+
+fn two_courses_with_exams() -> App {
+    let app = App::new(vec![
+        search("104299", 0, search_page(1, &[MATHE])),
+        search("104606", 0, search_page(1, &[SECOND_COURSE])),
+        exams("104299", 200, ONE_EXAM),
+        exams("104606", 200, OTHER_EXAM),
+    ]);
+    app.ok(&["add", "104299"]);
+    app.ok(&["add", "104606"]);
+    app
+}
+
+#[test]
+fn plan_without_chosen_exams_says_how_to_choose() {
+    let app = tracked_mathe_with_three_upcoming_exams();
+    let printed = app.ok(&["plan"]);
+    assert_eq!(
+        printed,
+        "no upcoming exams planned, choose them with: tiss plan --edit\n"
+    );
+}
+
+#[test]
+fn plan_with_nothing_tracked_says_how_to_start() {
+    let app = App::new(vec![]);
+    let hint = "no courses tracked yet, start with: tiss track <course>\n";
+    assert_eq!(app.ok(&["plan"]), hint);
+    assert_eq!(app.ok(&["plan", "--edit"]), hint);
+}
+
+#[test]
+fn plan_edit_without_terminal_fails_and_asks_nobody() {
+    let app = tracked_mathe_with_three_upcoming_exams();
+    assert!(app.err(&["plan", "--edit"]).contains("terminal"));
+    assert!(!app.requests().iter().any(|r| r.ends_with("examDates")));
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_shows_only_the_chosen_exams_with_gaps_between_them() {
+    let app = tracked_mathe_with_three_upcoming_exams();
+    in_terminal(&app, &["plan", "--edit"], "j c");
+    let expected = "\
+Exam date         Register by             Course
+2099-03-05 14:00  2099-03-03 10:00 3774w  104.299 VO Mathematik 2 für MB
+";
+    assert_eq!(app.ok_at(IN_WINTER, &["plan"]), expected);
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_edit_prints_the_new_plan() {
+    let app = tracked_mathe_with_three_upcoming_exams();
+    let printed = in_terminal(&app, &["plan", "--edit"], "j c");
+    let (_, after_the_picker) = printed.rsplit_once("\u{1b}[?1049l").unwrap();
+    assert!(after_the_picker.contains("2099-03-05 14:00"), "{printed}");
+    assert!(!after_the_picker.contains("2099-01-08 14:00"), "{printed}");
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_edit_offers_the_exam_title_to_tell_exams_apart() {
+    let app = tracked_mathe_with_three_upcoming_exams();
+    let printed = in_terminal(&app, &["plan", "--edit"], "c");
+    assert!(printed.contains("Later exam"), "{printed}");
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_limit_shows_only_the_soonest_planned_exams() {
+    let app = tracked_mathe_with_three_upcoming_exams();
+    in_terminal(&app, &["plan", "--edit"], "j c");
+    let all = app.ok(&["plan"]);
+    assert_eq!(all.lines().count(), 2);
+    in_terminal(&app, &["plan", "--edit"], " c");
+    let limited = app.ok(&["plan", "-n1"]);
+    assert_eq!(limited.lines().count(), 2, "{limited}");
+    assert!(limited.contains("2099-01-08"), "{limited}");
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_follows_an_exam_that_tiss_moves_to_another_date() {
+    let app = App::new(vec![
+        search("104299", 0, search_page(1, &[MATHE])),
+        exams("104299", 200, ONE_EXAM),
+    ]);
+    app.ok(&["add", "104299"]);
+    in_terminal(&app, &["plan", "--edit"], " c");
+    let moved = r#"<tuvienna><exam id="1"><title>Moved exam (2099-06-01)</title><examinationBegin>2099-06-01T14:00:00.000+02:00</examinationBegin></exam></tuvienna>"#;
+    app.tiss_now_answers(vec![exams("104299", 200, moved)]);
+    let printed = app.ok(&["plan", "--refresh"]);
+    assert!(printed.contains("2099-06-01 14:00"), "{printed}");
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_edit_starts_from_the_current_plan() {
+    let app = tracked_mathe_with_three_upcoming_exams();
+    in_terminal(&app, &["plan", "--edit"], "j c");
+    let before = app.ok(&["plan"]);
+    in_terminal(&app, &["plan", "--edit"], "c");
+    assert_eq!(app.ok(&["plan"]), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_edit_quit_keeps_the_plan_even_with_changes_made() {
+    let app = tracked_mathe_with_three_upcoming_exams();
+    in_terminal(&app, &["plan", "--edit"], "j c");
+    let before = app.ok(&["plan"]);
+    in_terminal(&app, &["plan", "--edit"], "aq");
+    assert_eq!(app.ok(&["plan"]), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_edit_can_empty_the_plan() {
+    let app = tracked_mathe_with_three_upcoming_exams();
+    in_terminal(&app, &["plan", "--edit"], "j c");
+    let printed = in_terminal(&app, &["plan", "--edit"], "j c");
+    assert!(printed.contains("no upcoming exams planned"), "{printed}");
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_edit_keeps_planned_exams_of_a_course_it_could_not_fetch() {
+    let app = two_courses_with_exams();
+    in_terminal(&app, &["plan", "--edit"], " c");
+    app.tiss_now_answers(vec![
+        exams("104299", 500, ""),
+        exams("104606", 200, OTHER_EXAM),
+    ]);
+    in_terminal(&app, &["plan", "--edit", "--refresh"], " c");
+    app.tiss_now_answers(vec![
+        exams("104299", 200, ONE_EXAM),
+        exams("104606", 200, OTHER_EXAM),
+    ]);
+    let printed = app.ok(&["plan", "--refresh"]);
+    assert!(printed.contains("104.299"), "{printed}");
+    assert!(printed.contains("104.606"), "{printed}");
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_edit_tells_apart_exams_of_two_courses_with_the_same_id() {
+    let app = two_courses_with_exams();
+    let both = vec![
+        exams("104299", 200, ONE_EXAM),
+        exams("104606", 200, ONE_EXAM),
+    ];
+    app.tiss_now_answers(both.clone());
+    in_terminal(&app, &["plan", "--edit", "--refresh"], "a c");
+    app.tiss_now_answers(vec![
+        exams("104299", 200, ONE_EXAM),
+        exams("104606", 500, ""),
+    ]);
+    in_terminal(&app, &["plan", "--edit", "--refresh"], "c");
+    app.tiss_now_answers(both);
+    let printed = app.ok(&["plan", "--refresh"]);
+    assert!(printed.contains("104.606"), "{printed}");
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_only_asks_tiss_about_courses_with_planned_exams() {
+    let app = two_courses_with_exams();
+    in_terminal(&app, &["plan", "--edit"], " c");
+    app.tiss_now_answers(vec![
+        exams("104299", 200, ONE_EXAM),
+        exams("104606", 500, ""),
+    ]);
+    let printed = app.ok(&["plan", "--refresh"]);
+    assert!(printed.contains("104.299"), "{printed}");
+    assert!(!printed.contains("104.606"), "{printed}");
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_reports_a_course_it_could_not_fetch() {
+    let app = two_courses_with_exams();
+    in_terminal(&app, &["plan", "--edit"], " c");
+    app.tiss_now_answers(vec![exams("104299", 500, "")]);
+    let error = app.err(&["plan", "--refresh"]);
+    assert!(error.contains("104.299"), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn untracking_a_course_forgets_its_planned_exams() {
+    let app = tracked_mathe_with_three_upcoming_exams();
+    in_terminal(&app, &["plan", "--edit"], "j c");
+    app.ok(&["untrack", "104299"]);
+    app.ok(&["add", "104299"]);
+    assert!(app.ok(&["plan"]).contains("no upcoming exams planned"));
+}
+
+#[test]
+fn list_keeps_showing_every_exam_whatever_is_planned() {
+    let app = tracked_mathe_with_three_upcoming_exams();
+    assert_eq!(app.ok(&["list"]).lines().count(), 4);
+}
+
+#[test]
+fn stored_exams_from_before_exam_ids_are_fetched_again_and_courses_kept() {
+    let app = App::new(vec![exams("104299", 200, ONE_EXAM)]);
+    let db = rusqlite::Connection::open(app.data.path().join("tiss.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE tracked_course (number TEXT PRIMARY KEY, name TEXT NOT NULL);
+         INSERT INTO tracked_course VALUES ('104299', 'VO Mathematik 2 für MB');
+         CREATE TABLE exam_fetch (
+             number TEXT PRIMARY KEY REFERENCES tracked_course ON DELETE CASCADE,
+             fetched_at TEXT NOT NULL
+         );
+         INSERT INTO exam_fetch VALUES ('104299', '2099-01-01T00:00:00+01:00');
+         CREATE TABLE exam (
+             number TEXT NOT NULL REFERENCES exam_fetch ON DELETE CASCADE,
+             title TEXT NOT NULL,
+             begins TEXT,
+             registration_end TEXT
+         );
+         INSERT INTO exam VALUES ('104299', 'Old row', '2099-02-01T14:00:00+01:00', NULL);",
+    )
+    .unwrap();
+    drop(db);
+    let printed = app.ok_at("2099-01-01T00:10:00+01:00", &["list"]);
+    assert!(printed.contains("2099-03-05 14:00"), "{printed}");
+    assert!(!printed.contains("2099-02-01"), "{printed}");
+    assert_eq!(
+        app.ok_at("2099-01-01T00:20:00+01:00", &["courses"]),
+        "104.299 VO Mathematik 2 für MB\n"
+    );
+}

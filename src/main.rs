@@ -5,25 +5,28 @@ mod picker;
 mod store;
 mod tiss;
 
+use std::collections::BTreeSet;
 use std::env;
 use std::io::{self, IsTerminal};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 use chrono::{DateTime, FixedOffset, Utc};
 use clap::builder::styling::{AnsiColor, Style, Styles};
 use clap::{Parser, Subcommand};
 
 use domain::{
-    Course, CourseNumber, CourseQuery, Exam, HEADING, Resolution, Semester, render_exams, resolve,
-    upcoming,
+    Course, CourseNumber, CourseQuery, Exam, HEADING, PlannedExam, Resolution, Semester,
+    exam_label, planned_exam, render_exams, resolve, upcoming,
 };
+use picker::Answer;
 use store::Store;
 use tiss::Tiss;
 
 const DEFAULT_API_URL: &str = "https://tiss.tuwien.ac.at/api";
+const NOTHING_TRACKED: &str = "no courses tracked yet, start with: tiss track <course>";
 
 /// The color of what a user types, in the help of the jj CLI.
 const LITERAL: Style = AnsiColor::Green.on_default().bold();
@@ -107,6 +110,30 @@ enum Command {
         #[arg(short = 'n', long, value_name = "COUNT")]
         limit: Option<NonZeroUsize>,
     },
+    /// Show the exams you plan on writing, the way `tiss list` shows all of them
+    ///
+    /// Choose them with --edit. The plan is kept until you change it, and follows an exam that
+    /// TISS moves to another date. Exams that have passed or that TISS no longer lists are not
+    /// shown. Untracking a course forgets its planned exams.
+    ///
+    /// Only courses with planned exams are fetched, on the same terms as `tiss list`.
+    #[command(after_long_help = environment_help())]
+    Plan {
+        /// Choose the planned exams in a checkbox list of all upcoming exams, then show them
+        ///
+        /// Quitting the list keeps the plan as it was. Exams of a course that cannot be fetched
+        /// are not offered and stay as they were. Needs a terminal.
+        #[arg(short, long)]
+        edit: bool,
+        /// Fetch exams from TISS even if the stored ones are recent
+        #[arg(long)]
+        refresh: bool,
+        /// Show at most this many exams, the soonest ones
+        ///
+        /// At least 1.
+        #[arg(short = 'n', long, value_name = "COUNT")]
+        limit: Option<NonZeroUsize>,
+    },
 }
 
 /// Written out here, since clap only documents environment variables that set an argument.
@@ -176,6 +203,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::List { refresh, limit } => app.list(refresh, limit),
+        Command::Plan {
+            edit,
+            refresh,
+            limit,
+        } => app.plan(edit, refresh, limit),
     }
 }
 
@@ -282,13 +314,69 @@ impl App {
         Ok(ExitCode::SUCCESS)
     }
 
-    /// Reports every course it could not fetch, and still shows the exams of the others.
     fn list(&mut self, refresh: bool, limit: Option<NonZeroUsize>) -> Result<ExitCode> {
         let courses = self.store.tracked_courses()?;
         if courses.is_empty() {
-            println!("no courses tracked yet, start with: tiss track <course>");
+            println!("{NOTHING_TRACKED}");
             return Ok(ExitCode::SUCCESS);
         }
+        let (rows, outcome) = self.upcoming_exams(courses, refresh);
+        self.show_exams(rows, limit, "no upcoming exams");
+        Ok(outcome)
+    }
+
+    fn plan(&mut self, edit: bool, refresh: bool, limit: Option<NonZeroUsize>) -> Result<ExitCode> {
+        let mut courses = self.store.tracked_courses()?;
+        if courses.is_empty() {
+            println!("{NOTHING_TRACKED}");
+            return Ok(ExitCode::SUCCESS);
+        }
+        ensure!(
+            !edit || can_ask(),
+            "choosing planned exams needs a terminal to ask in"
+        );
+        let mut planned = self.store.planned_exams()?;
+        if !edit {
+            courses.retain(|course| planned.iter().any(|(number, _)| *number == course.number));
+        }
+        let (mut rows, outcome) = self.upcoming_exams(courses, refresh);
+        if edit {
+            planned = self.edit_plan(&rows, planned)?;
+        }
+        rows.retain(|(course, exam)| planned.contains(&planned_exam(course, exam)));
+        let nothing = "no upcoming exams planned, choose them with: tiss plan --edit";
+        self.show_exams(rows, limit, nothing);
+        Ok(outcome)
+    }
+
+    /// Returns the plan as it stands afterwards.
+    fn edit_plan(
+        &mut self,
+        rows: &[(Course, Exam)],
+        planned: BTreeSet<PlannedExam>,
+    ) -> Result<BTreeSet<PlannedExam>> {
+        if rows.is_empty() {
+            return Ok(planned);
+        }
+        let offered: Vec<PlannedExam> = rows.iter().map(|(c, e)| planned_exam(c, e)).collect();
+        let labels = rows.iter().map(|(c, e)| exam_label(c, e)).collect();
+        let checked = offered.iter().map(|exam| planned.contains(exam)).collect();
+        let Answer::Checked(positions) =
+            picker::ask("Choose the exams you plan on writing", labels, checked)?
+        else {
+            return Ok(planned);
+        };
+        let chosen: Vec<PlannedExam> = positions.iter().map(|&i| offered[i].clone()).collect();
+        self.store.save_plan(&offered, &chosen)?;
+        self.store.planned_exams()
+    }
+
+    /// Reports every course it could not fetch, and still returns the exams of the others.
+    fn upcoming_exams(
+        &mut self,
+        courses: Vec<Course>,
+        refresh: bool,
+    ) -> (Vec<(Course, Exam)>, ExitCode) {
         let mut exams = Vec::new();
         let mut outcome = ExitCode::SUCCESS;
         for course in courses {
@@ -300,17 +388,24 @@ impl App {
                 }
             }
         }
-        let mut rows = upcoming(exams, self.now);
+        (upcoming(exams, self.now), outcome)
+    }
+
+    fn show_exams(
+        &self,
+        mut rows: Vec<(Course, Exam)>,
+        limit: Option<NonZeroUsize>,
+        nothing: &str,
+    ) {
         rows.truncate(limit.map_or(usize::MAX, NonZeroUsize::get));
         if rows.is_empty() {
-            println!("no upcoming exams");
+            println!("{nothing}");
         } else {
             print!(
                 "{}",
                 render_exams(&rows, self.now, terminal_width(), wants_color())
             );
         }
-        Ok(outcome)
     }
 
     fn exams_of(&mut self, number: &CourseNumber, refresh: bool) -> Result<Vec<Exam>> {
@@ -326,7 +421,7 @@ impl App {
 /// Lets the user check courses in a picker. Without a terminal, such as in a script, nobody can
 /// answer, so this fails and lists the candidates instead.
 fn select(title: &str, candidates: &[Course]) -> Result<Vec<Course>> {
-    if !(io::stdin().is_terminal() && io::stderr().is_terminal()) {
+    if !can_ask() {
         let list: Vec<String> = candidates.iter().map(|c| format!("  {c}")).collect();
         return Err(anyhow!(
             "{title}, but there is no terminal to ask in, use a course number:\n{}",
@@ -334,8 +429,16 @@ fn select(title: &str, candidates: &[Course]) -> Result<Vec<Course>> {
         ));
     }
     let labels = candidates.iter().map(Course::to_string).collect();
-    let checked = picker::ask(title, labels)?;
-    Ok(checked.iter().map(|&i| candidates[i].clone()).collect())
+    let unchecked = vec![false; candidates.len()];
+    Ok(match picker::ask(title, labels, unchecked)? {
+        Answer::Checked(positions) => positions.iter().map(|&i| candidates[i].clone()).collect(),
+        Answer::Quit => Vec::new(),
+    })
+}
+
+/// The picker talks to the user on stdin and stderr.
+fn can_ask() -> bool {
+    io::stdin().is_terminal() && io::stderr().is_terminal()
 }
 
 /// TISS search cannot find a course no longer offered by name, only its number reaches it.

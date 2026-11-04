@@ -18,6 +18,8 @@ tiss track "Analysis für Inf"   # track by part of the name
 tiss courses                    # show tracked courses
 tiss list                       # upcoming exams and registration deadlines, soonest first
 tiss ls -n5                     # only the five soonest exams
+tiss plan --edit                # choose the exams you plan on writing, then show them
+tiss plan                       # show those exams, just like tiss list
 tiss untrack 104.299            # stop tracking
 ```
 
@@ -27,7 +29,8 @@ In a terminal, `tiss list` colors its table, unless `NO_COLOR` is set, and cuts 
 with `…` so rows fit its width. Piped output stays plain and keeps them whole.
 
 When a name matches several courses, a checkbox list asks which you mean. `tiss untrack` without
-an argument asks the same about every tracked course. The keys are those of `jj restore -i`:
+an argument asks the same about every tracked course, and `tiss plan --edit` about every upcoming
+exam. The keys are those of `jj restore -i`:
 
 | Key | Action |
 | --- | --- |
@@ -39,7 +42,10 @@ an argument asks the same about every tracked course. The keys are those of `jj 
 | `q`, `Esc`, `Ctrl-C` | quit without changing anything |
 
 Without a terminal, as in a script, it fails, lists the candidates and changes nothing; use the
-number instead.
+number instead. `tiss plan --edit` has no such way around and needs a terminal.
+
+The plan follows an exam that TISS moves to another date. Exams that have passed or that TISS no
+longer lists drop out of `tiss plan`, and untracking a course forgets its planned exams.
 
 `tiss --help` and `tiss <command> --help` explain each command and these environment variables;
 `-h` shows a summary.
@@ -67,6 +73,6 @@ overrides it), which keeps requests to TISS down:
 - Exams can change at any time, so `tiss list` fetches them again once the stored ones are an hour
   old.
 
-`tiss track --refresh` and `tiss list --refresh` ask TISS regardless.
+`tiss track --refresh`, `tiss list --refresh` and `tiss plan --refresh` ask TISS regardless.
 
 An existing `tracked.json` is imported on the first run and renamed to `tracked.json.imported`.

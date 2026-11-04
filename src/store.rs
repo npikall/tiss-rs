@@ -1,7 +1,7 @@
 //! Everything tiss remembers, in one SQLite database.
 //! Each change runs in one transaction, so a crash leaves the old or the new state.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
 use std::{fs, path::Path};
 
@@ -10,7 +10,18 @@ use chrono::{DateTime, FixedOffset};
 use rusqlite::{Connection, OptionalExtension, Params, params};
 use serde::Deserialize;
 
-use crate::domain::{Course, CourseNumber, CourseQuery, Exam, Semester, exams_are_fresh};
+use crate::domain::{
+    Course, CourseNumber, CourseQuery, Exam, PlannedExam, Semester, exams_are_fresh,
+};
+
+/// Stored exams from before exam ids have no id to plan by, and can simply be fetched again.
+const FORGET_EXAMS_WITHOUT_ID: &str = "
+BEGIN;
+DROP TABLE IF EXISTS exam;
+DROP TABLE IF EXISTS exam_fetch;
+PRAGMA user_version = 1;
+COMMIT;
+";
 
 const SCHEMA: &str = "
 PRAGMA foreign_keys = ON;
@@ -44,9 +55,17 @@ CREATE TABLE IF NOT EXISTS exam_fetch (
 
 CREATE TABLE IF NOT EXISTS exam (
     number TEXT NOT NULL REFERENCES exam_fetch ON DELETE CASCADE,
+    id INTEGER NOT NULL,
     title TEXT NOT NULL,
     begins TEXT,
     registration_end TEXT
+);
+
+-- Not tied to the exam table, whose rows are replaced each time exams are fetched.
+CREATE TABLE IF NOT EXISTS planned_exam (
+    number TEXT NOT NULL REFERENCES tracked_course ON DELETE CASCADE,
+    exam_id INTEGER NOT NULL,
+    PRIMARY KEY (number, exam_id)
 );
 ";
 
@@ -64,6 +83,13 @@ impl Store {
         let context = || format!("cannot open {}", path.display());
         fs::create_dir_all(directory).with_context(context)?;
         let db = Connection::open(&path).with_context(context)?;
+        let version: i64 = db
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .with_context(context)?;
+        if version < 1 {
+            db.execute_batch(FORGET_EXAMS_WITHOUT_ID)
+                .with_context(context)?;
+        }
         db.execute_batch(SCHEMA).with_context(context)?;
         let mut store = Self { db };
         store.import_old_tracked(directory)?;
@@ -184,13 +210,14 @@ impl Store {
             return Ok(None);
         }
         let mut statement = self.db.prepare(
-            "SELECT title, begins, registration_end FROM exam WHERE number = ?1 ORDER BY rowid",
+            "SELECT id, title, begins, registration_end FROM exam WHERE number = ?1 ORDER BY rowid",
         )?;
         let exams = statement.query_map([number.compact()], |row| {
             Ok(Exam {
-                title: row.get(0)?,
-                begins: row.get(1)?,
-                registration_end: row.get(2)?,
+                id: row.get(0)?,
+                title: row.get(1)?,
+                begins: row.get(2)?,
+                registration_end: row.get(3)?,
             })
         })?;
         Ok(Some(exams.collect::<rusqlite::Result<_>>()?))
@@ -214,14 +241,47 @@ impl Store {
         )?;
         for exam in exams {
             transaction.execute(
-                "INSERT INTO exam (number, title, begins, registration_end)
-                 VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO exam (number, id, title, begins, registration_end)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
                     number.compact(),
+                    exam.id,
                     exam.title,
                     exam.begins,
                     exam.registration_end
                 ],
+            )?;
+        }
+        Ok(transaction.commit()?)
+    }
+
+    pub fn planned_exams(&self) -> Result<BTreeSet<PlannedExam>> {
+        let mut statement = self
+            .db
+            .prepare("SELECT number, exam_id FROM planned_exam")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        rows.map(|row| {
+            let (number, exam_id) = row?;
+            Ok((number.parse()?, exam_id))
+        })
+        .collect()
+    }
+
+    /// Of the exams `offered`, plans exactly the ones `chosen`. Any others stay as they are.
+    pub fn save_plan(&mut self, offered: &[PlannedExam], chosen: &[PlannedExam]) -> Result<()> {
+        let transaction = self.db.transaction()?;
+        for (number, exam_id) in offered {
+            transaction.execute(
+                "DELETE FROM planned_exam WHERE number = ?1 AND exam_id = ?2",
+                params![number.compact(), exam_id],
+            )?;
+        }
+        for (number, exam_id) in chosen {
+            transaction.execute(
+                "INSERT OR IGNORE INTO planned_exam (number, exam_id) VALUES (?1, ?2)",
+                params![number.compact(), exam_id],
             )?;
         }
         Ok(transaction.commit()?)

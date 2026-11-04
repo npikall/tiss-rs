@@ -11,4 +11,6 @@
 - **Exam date**: when the exam begins (`examinationBegin`). TISS omits it for some exams, shown as `TBA`.
 - **Registration deadline**: last moment to register (`applicationEnd`). Shown in red once passed.
 - **Exam gap**: calendar days from the exam before to this one, or from today for the first. Shown as `12d` below 14 days, then in whole weeks as `3w`. Exams without a date have none.
+- **Exam id**: what TISS calls one exam (`id`). It stays when the exam moves, unlike the title, which contains the date.
+- **Planned exam**: an exam the user plans on writing, chosen with `tiss plan --edit` and remembered by course number and exam id.
 - **Upcoming exam**: an exam whose date, or registration deadline if it has no date, is not in the past.

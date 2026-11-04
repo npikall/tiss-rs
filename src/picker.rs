@@ -13,10 +13,18 @@ use crossterm::{execute, queue};
 
 const KEYS: &str = "↑↓ move  space toggle  enter toggle+next  a invert  A all  c confirm  q quit";
 
-/// Shows `labels`, of which there must be at least one, and returns the positions of the ones
-/// checked. Quitting checks none. Needs a terminal on stdin and stderr.
-pub fn ask(title: &str, labels: Vec<String>) -> Result<Vec<usize>> {
-    let mut picker = Picker::new(title, labels);
+/// How the user left the picker.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Answer {
+    /// Confirmed with the labels at these positions checked.
+    Checked(Vec<usize>),
+    Quit,
+}
+
+/// Shows `labels`, of which there must be at least one, each starting out as `checked` says.
+/// Needs a terminal on stdin and stderr.
+pub fn ask(title: &str, labels: Vec<String>, checked: Vec<bool>) -> Result<Answer> {
+    let mut picker = Picker::new(title, labels, checked);
     let mut screen = Screen::enter()?;
     loop {
         let (width, height) = terminal::size()
@@ -26,9 +34,9 @@ pub fn ask(title: &str, labels: Vec<String>) -> Result<Vec<usize>> {
         screen.draw(&picker.frame(width.into(), height.into()))?;
         if let Event::Key(key) = event::read()?
             && let Some(action) = action_of(key)
-            && let Some(checked) = picker.apply(action)
+            && let Some(answer) = picker.apply(action)
         {
-            return Ok(checked);
+            return Ok(answer);
         }
     }
 }
@@ -97,10 +105,10 @@ struct Picker {
 }
 
 impl Picker {
-    fn new(title: &str, labels: Vec<String>) -> Self {
+    fn new(title: &str, labels: Vec<String>, checked: Vec<bool>) -> Self {
         Self {
             title: title.into(),
-            checked: vec![false; labels.len()],
+            checked,
             labels,
             cursor: 0,
             top: 0,
@@ -108,8 +116,8 @@ impl Picker {
         }
     }
 
-    /// Returns the checked positions once the user is done.
-    fn apply(&mut self, action: Action) -> Option<Vec<usize>> {
+    /// Returns the answer once the user is done.
+    fn apply(&mut self, action: Action) -> Option<Answer> {
         match action {
             Action::Up => self.move_up(1),
             Action::Down => self.move_down(1),
@@ -127,9 +135,11 @@ impl Picker {
             }
             Action::Confirm => {
                 let positions = 0..self.checked.len();
-                return Some(positions.filter(|&i| self.checked[i]).collect());
+                return Some(Answer::Checked(
+                    positions.filter(|&i| self.checked[i]).collect(),
+                ));
             }
-            Action::Quit => return Some(Vec::new()),
+            Action::Quit => return Some(Answer::Quit),
         }
         None
     }
@@ -221,8 +231,9 @@ mod tests {
     const WIDTH: usize = 40;
 
     fn picker(count: usize) -> Picker {
-        let labels = (0..count).map(|i| format!("course {i}")).collect();
-        Picker::new("Pick", labels)
+        let labels: Vec<String> = (0..count).map(|i| format!("course {i}")).collect();
+        let checked = vec![false; labels.len()];
+        Picker::new("Pick", labels, checked)
     }
 
     fn press(picker: &mut Picker, actions: &[Action]) {
@@ -232,7 +243,10 @@ mod tests {
     }
 
     fn confirmed(mut picker: Picker) -> Vec<usize> {
-        picker.apply(Action::Confirm).unwrap()
+        match picker.apply(Action::Confirm) {
+            Some(Answer::Checked(positions)) => positions,
+            other => panic!("expected checked positions, got {other:?}"),
+        }
     }
 
     fn lines(picker: &mut Picker, height: usize) -> Vec<String> {
@@ -284,10 +298,18 @@ mod tests {
     }
 
     #[test]
-    fn quit_returns_nothing_even_with_courses_checked() {
+    fn quit_is_not_a_confirmation_even_with_courses_checked() {
         let mut p = picker(2);
         press(&mut p, &[Action::Toggle]);
-        assert_eq!(p.apply(Action::Quit), Some(vec![]));
+        assert_eq!(p.apply(Action::Quit), Some(Answer::Quit));
+    }
+
+    #[test]
+    fn labels_can_start_out_checked_and_be_unchecked() {
+        let labels = vec!["a".into(), "b".into(), "c".into()];
+        let mut p = Picker::new("Pick", labels, vec![false, true, true]);
+        press(&mut p, &[Action::Down, Action::Toggle]);
+        assert_eq!(confirmed(p), [2]);
     }
 
     #[test]
@@ -317,7 +339,7 @@ mod tests {
 
     #[test]
     fn frame_rows_fill_the_width_counting_characters_not_bytes() {
-        let mut p = Picker::new("ä".repeat(60).as_str(), vec!["ü".into()]);
+        let mut p = Picker::new("ä".repeat(60).as_str(), vec!["ü".into()], vec![false]);
         for row in p.frame(WIDTH, 3) {
             assert_eq!(row.text.chars().count(), WIDTH);
         }

@@ -128,10 +128,27 @@ pub fn resolve(query: &CourseQuery, mut courses: Vec<Course>) -> Resolution {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Exam {
+    /// Stays the same when TISS moves or renames the exam, whose title contains its date.
+    pub id: i64,
     pub title: String,
     /// TISS omits this for some exams.
     pub begins: Option<DateTime<FixedOffset>>,
     pub registration_end: Option<DateTime<FixedOffset>>,
+}
+
+/// Names one exam of one course, so that a plan outlives the stored exams.
+pub type PlannedExam = (CourseNumber, i64);
+
+pub fn planned_exam(course: &Course, exam: &Exam) -> PlannedExam {
+    (course.number.clone(), exam.id)
+}
+
+/// One picker line. The title tells exams at the same moment apart, so it comes before the course
+/// name, which is cut first when the line is too long.
+pub fn exam_label(course: &Course, exam: &Exam) -> String {
+    let moment = exam.begins.map_or("TBA".into(), format_moment);
+    let Course { number, name } = course;
+    format!("{moment:<MOMENT_WIDTH$}  {number}  {}  {name}", exam.title)
 }
 
 /// Exams can change at any time, so stored ones are only trusted this long.
@@ -335,6 +352,21 @@ fn deadline_cell(
 mod tests {
     use super::*;
 
+    #[test]
+    fn exam_label_puts_the_title_before_the_course_name() {
+        let label = exam_label(
+            &course("104299", "VO Mathematik"),
+            &exam("Prüfung", Some("2027-01-08T14:00:00+01:00"), None),
+        );
+        assert_eq!(label, "2027-01-08 14:00  104.299  Prüfung  VO Mathematik");
+    }
+
+    #[test]
+    fn exam_label_lines_up_an_exam_without_a_date() {
+        let label = exam_label(&course("104299", "VO"), &exam("E", None, None));
+        assert_eq!(label, "TBA               104.299  E  VO");
+    }
+
     fn number(s: &str) -> CourseNumber {
         s.parse().unwrap()
     }
@@ -352,6 +384,7 @@ mod tests {
 
     fn exam(title: &str, begins: Option<&str>, end: Option<&str>) -> Exam {
         Exam {
+            id: 0,
             title: title.into(),
             begins: begins.map(at),
             registration_end: end.map(at),
