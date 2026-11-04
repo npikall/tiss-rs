@@ -4,12 +4,12 @@ use std::fmt;
 use std::str::FromStr;
 
 use anyhow::{Context, Result, ensure};
-use chrono::{DateTime, FixedOffset};
-use serde::{Deserialize, Serialize};
+use chrono::{DateTime, Datelike, FixedOffset, TimeDelta};
+use serde::Deserialize;
 
 /// TISS course number in canonical form: three digits, then three alphanumerics.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(try_from = "String")]
 pub struct CourseNumber(String);
 
 impl CourseNumber {
@@ -41,12 +41,6 @@ impl TryFrom<String> for CourseNumber {
 
     fn try_from(s: String) -> Result<Self> {
         s.parse()
-    }
-}
-
-impl From<CourseNumber> for String {
-    fn from(n: CourseNumber) -> String {
-        n.0
     }
 }
 
@@ -139,6 +133,39 @@ pub struct Exam {
     pub registration_end: Option<DateTime<FixedOffset>>,
 }
 
+/// Exams can change at any time, so stored ones are only trusted this long.
+const EXAMS_MAX_AGE: TimeDelta = TimeDelta::hours(1);
+
+pub fn exams_are_fresh(fetched_at: DateTime<FixedOffset>, now: DateTime<FixedOffset>) -> bool {
+    now - fetched_at < EXAMS_MAX_AGE
+}
+
+/// A TU Wien semester: summer runs March to September, winter October to February.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Semester {
+    Summer(i32),
+    Winter(i32),
+}
+
+impl Semester {
+    pub fn containing(moment: DateTime<FixedOffset>) -> Self {
+        match moment.month() {
+            1 | 2 => Self::Winter(moment.year() - 1),
+            3..=9 => Self::Summer(moment.year()),
+            _ => Self::Winter(moment.year()),
+        }
+    }
+}
+
+impl fmt::Display for Semester {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Summer(year) => write!(f, "{year}S"),
+            Self::Winter(year) => write!(f, "{year}W"),
+        }
+    }
+}
+
 /// Exams still ahead of `now`, soonest first; exams without a date go last.
 pub fn upcoming(mut exams: Vec<(Course, Exam)>, now: DateTime<FixedOffset>) -> Vec<(Course, Exam)> {
     exams.retain(|(_, exam)| {
@@ -220,6 +247,24 @@ mod tests {
 
     fn titles(rows: &[(Course, Exam)]) -> Vec<&str> {
         rows.iter().map(|(_, e)| e.title.as_str()).collect()
+    }
+
+    #[test]
+    fn semester_changes_on_the_first_of_march_and_october() {
+        let semester = |s: &str| Semester::containing(at(s)).to_string();
+        assert_eq!(semester("2027-01-15T12:00:00+01:00"), "2026W");
+        assert_eq!(semester("2027-02-28T23:59:59+01:00"), "2026W");
+        assert_eq!(semester("2027-03-01T00:00:00+01:00"), "2027S");
+        assert_eq!(semester("2027-09-30T23:59:59+02:00"), "2027S");
+        assert_eq!(semester("2027-10-01T00:00:00+02:00"), "2027W");
+        assert_eq!(semester("2027-12-31T23:59:59+01:00"), "2027W");
+    }
+
+    #[test]
+    fn stored_exams_are_fresh_for_less_than_the_maximum_age() {
+        let fetched = at("2026-06-01T12:00:00+02:00");
+        assert!(exams_are_fresh(fetched, at("2026-06-01T12:59:59+02:00")));
+        assert!(!exams_are_fresh(fetched, at("2026-06-01T13:00:00+02:00")));
     }
 
     #[test]

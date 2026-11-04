@@ -33,17 +33,26 @@ fn search_page(total: usize, titles: &[&str]) -> String {
 struct App {
     data: TempDir,
     base: String,
+    routes: Routes,
     requests: Arc<Mutex<Vec<String>>>,
 }
 
+type Route = (String, u16, String);
+type Routes = Arc<Mutex<HashMap<String, (u16, String)>>>;
+
+fn route_map(routes: Vec<Route>) -> HashMap<String, (u16, String)> {
+    routes
+        .into_iter()
+        .map(|(path, status, body)| (path, (status, body)))
+        .collect()
+}
+
 impl App {
-    fn new(routes: Vec<(String, u16, String)>) -> Self {
+    fn new(routes: Vec<Route>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let routes: HashMap<_, _> = routes
-            .into_iter()
-            .map(|(path, status, body)| (path, (status, body)))
-            .collect();
+        let routes = Arc::new(Mutex::new(route_map(routes)));
+        let served = Arc::clone(&routes);
         let requests = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&requests);
         thread::spawn(move || {
@@ -58,7 +67,9 @@ impl App {
                 }
                 let path = request.split(' ').nth(1).unwrap().to_owned();
                 log.lock().unwrap().push(path.clone());
-                let (status, body) = routes
+                let (status, body) = served
+                    .lock()
+                    .unwrap()
                     .get(&path)
                     .cloned()
                     .unwrap_or((500, format!("unexpected request {path}")));
@@ -73,17 +84,34 @@ impl App {
         Self {
             data: TempDir::new().unwrap(),
             base,
+            routes,
             requests,
         }
     }
 
-    fn tiss(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_tiss"))
+    /// From now on TISS answers differently.
+    fn tiss_now_answers(&self, routes: Vec<Route>) {
+        *self.routes.lock().unwrap() = route_map(routes);
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_tiss"));
+        command
             .args(args)
             .env("TISS_DATA_DIR", self.data.path())
-            .env("TISS_API_URL", &self.base)
-            .output()
-            .unwrap()
+            .env("TISS_API_URL", &self.base);
+        command
+    }
+
+    fn tiss(&self, args: &[&str]) -> Output {
+        self.command(args).output().unwrap()
+    }
+
+    /// Runs with the clock set to `now`.
+    fn ok_at(&self, now: &str, args: &[&str]) -> String {
+        let output = self.command(args).env("TISS_NOW", now).output().unwrap();
+        assert!(output.status.success(), "{args:?}: {}", stderr(&output));
+        String::from_utf8(output.stdout).unwrap()
     }
 
     fn ok(&self, args: &[&str]) -> String {
@@ -321,4 +349,250 @@ fn unreadable_store_is_an_error_not_an_empty_list() {
     let app = App::new(vec![]);
     std::fs::create_dir(app.data.path().join("tracked.json")).unwrap();
     assert!(app.err(&["courses"]).contains("tracked.json"));
+}
+
+#[test]
+fn everything_is_stored_in_one_database_file() {
+    let app = App::new(vec![search("104299", 0, search_page(1, &[MATHE]))]);
+    app.ok(&["add", "104299"]);
+    let files: Vec<_> = std::fs::read_dir(app.data.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(files, ["tiss.db"]);
+}
+
+#[test]
+fn corrupt_database_is_reported_and_left_untouched() {
+    let app = App::new(vec![]);
+    let database = app.data.path().join("tiss.db");
+    let garbage = "not a database, but long enough to be read as one".repeat(100);
+    std::fs::write(&database, &garbage).unwrap();
+    assert!(app.err(&["courses"]).contains("tiss.db"));
+    assert_eq!(std::fs::read_to_string(database).unwrap(), garbage);
+}
+
+const TRACKED_JSON: &str = r#"{"courses":{"104299":"VO Mathematik 2 für MB"}}"#;
+
+#[test]
+fn courses_tracked_in_the_old_json_file_are_imported_once() {
+    let app = App::new(vec![]);
+    let old = app.data.path().join("tracked.json");
+    std::fs::write(&old, TRACKED_JSON).unwrap();
+    assert_eq!(app.ok(&["courses"]), "104.299 VO Mathematik 2 für MB\n");
+    assert!(!old.exists());
+    assert!(app.data.path().join("tracked.json.imported").exists());
+    app.ok(&["remove", "104299"]);
+    assert_eq!(app.ok(&["courses"]), "");
+}
+
+const IN_WINTER: &str = "2026-11-04T12:00:00+01:00";
+const LATER_IN_WINTER: &str = "2027-02-28T12:00:00+01:00";
+const NEXT_SUMMER: &str = "2027-03-01T12:00:00+01:00";
+
+const RENAMED: &str = "104.299 VO Mathematik 2 neu, 2027S";
+
+#[test]
+fn a_course_found_once_stays_known_for_the_whole_semester() {
+    let app = App::new(vec![search("104299", 0, search_page(1, &[MATHE]))]);
+    app.ok_at(IN_WINTER, &["add", "104299"]);
+    app.ok_at(IN_WINTER, &["remove", "104299"]);
+    app.tiss_now_answers(vec![]);
+    let output = app.ok_at(LATER_IN_WINTER, &["add", "104.299"]);
+    assert!(output.contains("VO Mathematik 2 für MB"), "{output}");
+    assert_eq!(app.requests().len(), 1);
+}
+
+#[test]
+fn a_name_search_is_answered_once_per_semester_ignoring_case() {
+    let two = search_page(2, &[MATHE, "104.606 UE Mathematik 2 für MB, 2027S"]);
+    let app = App::new(vec![search("Mathematik", 0, two)]);
+    let first = app.err(&["add", "Mathematik"]);
+    let second = app.err(&["add", "mathematik"]);
+    assert_eq!(first.replace("Mathematik\"", "mathematik\""), second);
+    assert_eq!(app.requests().len(), 1);
+}
+
+#[test]
+fn a_number_is_known_from_an_earlier_name_search() {
+    let two = search_page(2, &[MATHE, "104.606 UE Mathematik 2 für MB, 2027S"]);
+    let app = App::new(vec![search("Mathematik", 0, two)]);
+    app.err(&["add", "Mathematik"]);
+    assert!(app.ok(&["add", "104.606"]).contains("UE Mathematik 2"));
+    assert_eq!(app.requests().len(), 1);
+}
+
+#[test]
+fn a_new_semester_asks_tiss_again() {
+    let app = App::new(vec![search("104299", 0, search_page(1, &[MATHE]))]);
+    app.ok_at(IN_WINTER, &["add", "104299"]);
+    app.ok_at(IN_WINTER, &["remove", "104299"]);
+    app.tiss_now_answers(vec![search("104299", 0, search_page(1, &[RENAMED]))]);
+    let output = app.ok_at(NEXT_SUMMER, &["add", "104299"]);
+    assert!(output.contains("VO Mathematik 2 neu"), "{output}");
+}
+
+#[test]
+fn a_new_semester_forgets_the_courses_of_the_last_one() {
+    let two = search_page(2, &[MATHE, "104.606 UE Mathematik 2 für MB, 2027S"]);
+    let app = App::new(vec![
+        search("Mathematik", 0, two),
+        search("Physik", 0, search_page(1, &["134.000 VO Physik, 2027S"])),
+    ]);
+    app.err(&["add", "Mathematik"]);
+    app.ok_at(NEXT_SUMMER, &["add", "Physik"]);
+    let database = rusqlite::Connection::open(app.data.path().join("tiss.db")).unwrap();
+    let remembered: i64 = database
+        .query_row("SELECT count(*) FROM known_course", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(remembered, 1);
+}
+
+#[test]
+fn adding_a_tracked_number_never_asks_tiss() {
+    let app = App::new(vec![search("104299", 0, search_page(1, &[MATHE]))]);
+    app.ok_at(IN_WINTER, &["add", "104299"]);
+    assert!(
+        app.ok_at(NEXT_SUMMER, &["add", "104299"])
+            .contains("already")
+    );
+    assert_eq!(app.requests().len(), 1);
+}
+
+#[test]
+fn a_search_without_results_is_asked_again() {
+    let (path, _, body) = search("999999", 0, search_page(0, &[]));
+    let app = App::new(vec![(path, 404, body)]);
+    app.err(&["add", "999999"]);
+    app.tiss_now_answers(vec![search(
+        "999999",
+        0,
+        search_page(1, &["999.999 VO Neu, 2027S"]),
+    )]);
+    assert!(app.ok(&["add", "999999"]).contains("VO Neu"));
+}
+
+#[test]
+fn add_refresh_replaces_what_is_known_about_a_search() {
+    let two = search_page(2, &[MATHE, "104.606 UE Mathematik 2 für MB, 2027S"]);
+    let app = App::new(vec![search("Mathematik", 0, two)]);
+    app.err(&["add", "Mathematik"]);
+    app.tiss_now_answers(vec![search("Mathematik", 0, search_page(1, &[RENAMED]))]);
+    let output = app.ok(&["add", "--refresh", "Mathematik"]);
+    assert!(output.contains("104.299 VO Mathematik 2 neu"), "{output}");
+    app.ok(&["remove", "104299"]);
+    assert!(app.ok(&["add", "Mathematik"]).contains("neu"));
+    assert_eq!(app.requests().len(), 2);
+}
+
+fn tracked_with_exams(body: &str) -> App {
+    let app = App::new(vec![
+        search("104299", 0, search_page(1, &[MATHE])),
+        exams("104299", 200, body),
+    ]);
+    app.ok_at(IN_WINTER, &["add", "104299"]);
+    app
+}
+
+fn exam_requests(app: &App) -> usize {
+    let requests = app.requests();
+    requests.iter().filter(|r| r.contains("examDates")).count()
+}
+
+const ONE_EXAM: &str = r#"<tuvienna><exam id="1"><title>Old exam</title><examinationBegin>2099-03-05T14:00:00.000+01:00</examinationBegin><applicationEnd>2099-03-03T10:00:00.000+01:00</applicationEnd></exam></tuvienna>"#;
+const OTHER_EXAM: &str = r#"<tuvienna><exam id="2"><title>New exam</title><examinationBegin>2099-04-05T14:00:00.000+01:00</examinationBegin></exam></tuvienna>"#;
+const WITHIN_THE_HOUR: &str = "2026-11-04T12:59:00+01:00";
+const AFTER_THE_HOUR: &str = "2026-11-04T13:00:00+01:00";
+
+#[test]
+fn list_shows_stored_exams_exactly_as_fetched_within_the_hour() {
+    let app = tracked_with_exams(EXAMS);
+    let first = app.ok_at(IN_WINTER, &["list"]);
+    let second = app.ok_at(WITHIN_THE_HOUR, &["list"]);
+    assert!(first.contains("Later exam"), "{first}");
+    assert_eq!(first, second);
+    assert_eq!(exam_requests(&app), 1);
+}
+
+#[test]
+fn list_fetches_again_once_stored_exams_are_an_hour_old() {
+    let app = tracked_with_exams(ONE_EXAM);
+    app.ok_at(IN_WINTER, &["list"]);
+    app.tiss_now_answers(vec![exams("104299", 200, OTHER_EXAM)]);
+    let output = app.ok_at(AFTER_THE_HOUR, &["list"]);
+    assert!(output.contains("New exam"), "{output}");
+    assert!(!output.contains("Old exam"), "{output}");
+    assert_eq!(exam_requests(&app), 2);
+}
+
+#[test]
+fn list_refresh_fetches_even_when_stored_exams_are_fresh() {
+    let app = tracked_with_exams(ONE_EXAM);
+    app.ok_at(IN_WINTER, &["list"]);
+    app.tiss_now_answers(vec![exams("104299", 200, OTHER_EXAM)]);
+    let output = app.ok_at(IN_WINTER, &["list", "--refresh"]);
+    assert!(output.contains("New exam"), "{output}");
+    assert!(!output.contains("Old exam"), "{output}");
+}
+
+#[test]
+fn a_course_without_exams_is_not_asked_again_within_the_hour() {
+    let app = tracked_with_exams(NO_EXAMS);
+    app.tiss_now_answers(vec![exams("104299", 404, NO_EXAMS)]);
+    app.ok_at(IN_WINTER, &["list"]);
+    assert!(
+        app.ok_at(WITHIN_THE_HOUR, &["list"])
+            .contains("no upcoming")
+    );
+    assert_eq!(exam_requests(&app), 1);
+}
+
+#[test]
+fn a_failed_exam_fetch_is_not_stored() {
+    let app = tracked_with_exams(ONE_EXAM);
+    app.tiss_now_answers(vec![exams("104299", 404, NO_COURSE)]);
+    app.tiss(&["list"]);
+    app.tiss_now_answers(vec![exams("104299", 200, ONE_EXAM)]);
+    assert!(app.ok(&["list"]).contains("Old exam"));
+}
+
+#[test]
+fn a_stored_deadline_closes_when_its_time_passes() {
+    let closes_soon = r#"<tuvienna><exam id="1"><title>E</title><examinationBegin>2099-01-01T10:00:00.000+01:00</examinationBegin><applicationEnd>2026-11-04T12:30:00.000+01:00</applicationEnd></exam></tuvienna>"#;
+    let app = tracked_with_exams(closes_soon);
+    assert!(!app.ok_at(IN_WINTER, &["list"]).contains("closed"));
+    assert!(app.ok_at(WITHIN_THE_HOUR, &["list"]).contains("closed"));
+    assert_eq!(exam_requests(&app), 1);
+}
+
+#[test]
+fn removing_a_course_forgets_its_exams() {
+    let app = tracked_with_exams(ONE_EXAM);
+    app.ok_at(IN_WINTER, &["list"]);
+    app.ok_at(IN_WINTER, &["remove", "104299"]);
+    app.ok_at(IN_WINTER, &["add", "104299"]);
+    app.tiss_now_answers(vec![exams("104299", 200, OTHER_EXAM)]);
+    assert!(app.ok_at(IN_WINTER, &["list"]).contains("New exam"));
+}
+
+#[test]
+fn an_invalid_clock_override_is_reported() {
+    let app = App::new(vec![]);
+    let output = app
+        .command(&["courses"])
+        .env("TISS_NOW", "soon")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("TISS_NOW"));
+}
+
+#[test]
+fn different_searches_keep_their_own_answers() {
+    let app = App::new(vec![
+        search("Mathematik", 0, search_page(1, &[MATHE])),
+        search("Physik", 0, search_page(1, &["134.000 VO Physik, 2027S"])),
+    ]);
+    assert!(app.ok(&["add", "Mathematik"]).contains("104.299"));
+    assert!(app.ok(&["add", "Physik"]).contains("134.000"));
 }

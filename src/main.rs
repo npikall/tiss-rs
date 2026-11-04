@@ -5,15 +5,17 @@ mod store;
 mod tiss;
 
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Error, Result, anyhow};
-use chrono::Utc;
+use chrono::{DateTime, FixedOffset, Utc};
 use clap::{Parser, Subcommand};
 
-use domain::{Course, CourseQuery, Resolution, render_exams, resolve, upcoming};
-use store::Tracked;
+use domain::{
+    Course, CourseNumber, CourseQuery, Exam, Resolution, Semester, render_exams, resolve, upcoming,
+};
+use store::Store;
 use tiss::Tiss;
 
 const DEFAULT_API_URL: &str = "https://tiss.tuwien.ac.at/api";
@@ -28,7 +30,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Start tracking a course, by number (104.299) or by part of its name
-    Add { course: CourseQuery },
+    Add {
+        course: CourseQuery,
+        /// Ask TISS even if the course is already known this semester
+        #[arg(long)]
+        refresh: bool,
+    },
     /// Stop tracking a course, by number or by part of its name
     #[command(visible_alias = "rm")]
     Remove { course: CourseQuery },
@@ -36,7 +43,11 @@ enum Command {
     Courses,
     /// Show upcoming exams of tracked courses with their registration deadlines
     #[command(visible_alias = "ls")]
-    List,
+    List {
+        /// Fetch exams from TISS even if the stored ones are recent
+        #[arg(long)]
+        refresh: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -47,59 +58,123 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<ExitCode> {
-    let path = store_path()?;
-    let tracked = Tracked::load(&path)?;
+    let now = now()?;
+    let store = Store::open(&data_directory()?)?;
     let tiss = Tiss::new(env::var("TISS_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.into()));
+    let mut app = App { store, tiss, now };
     match cli.command {
-        Command::Add { course } => add(&course, tracked, &tiss, &path),
-        Command::Remove { course } => remove(&course, tracked, &path),
+        Command::Add { course, refresh } => app.add(&course, refresh),
+        Command::Remove { course } => app.remove(&course),
         Command::Courses => {
-            tracked.courses().iter().for_each(|c| println!("{c}"));
+            let courses = app.store.tracked_courses()?;
+            courses.iter().for_each(|c| println!("{c}"));
             Ok(ExitCode::SUCCESS)
         }
-        Command::List => Ok(list(&tracked, &tiss)),
+        Command::List { refresh } => app.list(refresh),
     }
 }
 
-fn store_path() -> Result<PathBuf> {
-    let directory = match env::var_os("TISS_DATA_DIR") {
-        Some(directory) => PathBuf::from(directory),
-        None => dirs::data_dir()
+/// `TISS_NOW` overrides the clock, because what is stored depends on when it was stored.
+fn now() -> Result<DateTime<FixedOffset>> {
+    match env::var("TISS_NOW") {
+        Ok(now) => DateTime::parse_from_rfc3339(&now).context("invalid TISS_NOW"),
+        Err(_) => Ok(Utc::now().fixed_offset()),
+    }
+}
+
+fn data_directory() -> Result<PathBuf> {
+    match env::var_os("TISS_DATA_DIR") {
+        Some(directory) => Ok(PathBuf::from(directory)),
+        None => Ok(dirs::data_dir()
             .context("cannot determine the user data directory")?
-            .join("tiss"),
-    };
-    Ok(directory.join("tracked.json"))
+            .join("tiss")),
+    }
 }
 
-fn add(query: &CourseQuery, mut tracked: Tracked, tiss: &Tiss, path: &Path) -> Result<ExitCode> {
-    let course = match resolve(query, tiss.search(&query.to_string())?) {
-        Resolution::Found(course) => course,
-        Resolution::NotFound => return Err(anyhow!("no course matches \"{query}\"")),
-        Resolution::Ambiguous(candidates) => return Err(ambiguous(query, &candidates)),
-    };
-    let label = course.to_string();
-    if tracked.add(course) {
-        tracked.save(path)?;
-        println!("now tracking {label}");
-    } else {
-        println!("already tracking {label}");
-    }
-    Ok(ExitCode::SUCCESS)
+struct App {
+    store: Store,
+    tiss: Tiss,
+    now: DateTime<FixedOffset>,
 }
 
-fn remove(query: &CourseQuery, mut tracked: Tracked, path: &Path) -> Result<ExitCode> {
-    match resolve(query, tracked.courses()) {
-        Resolution::Found(course) => {
-            tracked.remove(&course.number);
-            tracked.save(path)?;
-            println!("removed {course}");
+impl App {
+    fn add(&mut self, query: &CourseQuery, refresh: bool) -> Result<ExitCode> {
+        let course = match resolve(query, self.courses_matching(query, refresh)?) {
+            Resolution::Found(course) => course,
+            Resolution::NotFound => return Err(anyhow!("no course matches \"{query}\"")),
+            Resolution::Ambiguous(candidates) => return Err(ambiguous(query, &candidates)),
+        };
+        if self.store.track(&course)? {
+            println!("now tracking {course}");
+        } else {
+            println!("already tracking {course}");
         }
-        Resolution::NotFound => println!("not tracked, nothing to remove"),
-        Resolution::Ambiguous(candidates) => {
-            return Err(ambiguous(query, &candidates));
-        }
+        Ok(ExitCode::SUCCESS)
     }
-    Ok(ExitCode::SUCCESS)
+
+    /// Courses do not change within a semester, so TISS is only asked about unknown ones.
+    fn courses_matching(&mut self, query: &CourseQuery, refresh: bool) -> Result<Vec<Course>> {
+        let semester = Semester::containing(self.now);
+        if !refresh {
+            let known = self.store.known_courses(query, semester)?;
+            if !known.is_empty() {
+                return Ok(known);
+            }
+        }
+        let found = self.tiss.search(&query.to_string())?;
+        self.store.save_search(query, semester, &found)?;
+        Ok(found)
+    }
+
+    fn remove(&mut self, query: &CourseQuery) -> Result<ExitCode> {
+        match resolve(query, self.store.tracked_courses()?) {
+            Resolution::Found(course) => {
+                self.store.untrack(&course.number)?;
+                println!("removed {course}");
+            }
+            Resolution::NotFound => println!("not tracked, nothing to remove"),
+            Resolution::Ambiguous(candidates) => {
+                return Err(ambiguous(query, &candidates));
+            }
+        }
+        Ok(ExitCode::SUCCESS)
+    }
+
+    /// Reports every course it could not fetch, and still shows the exams of the others.
+    fn list(&mut self, refresh: bool) -> Result<ExitCode> {
+        let courses = self.store.tracked_courses()?;
+        if courses.is_empty() {
+            println!("no courses tracked yet, start with: tiss add <course>");
+            return Ok(ExitCode::SUCCESS);
+        }
+        let mut exams = Vec::new();
+        let mut outcome = ExitCode::SUCCESS;
+        for course in courses {
+            match self.exams_of(&course.number, refresh) {
+                Ok(found) => exams.extend(found.into_iter().map(|e| (course.clone(), e))),
+                Err(error) => {
+                    eprintln!("error: {course}: {error:#}");
+                    outcome = ExitCode::FAILURE;
+                }
+            }
+        }
+        let rows = upcoming(exams, self.now);
+        if rows.is_empty() {
+            println!("no upcoming exams");
+        } else {
+            print!("{}", render_exams(&rows, self.now));
+        }
+        Ok(outcome)
+    }
+
+    fn exams_of(&mut self, number: &CourseNumber, refresh: bool) -> Result<Vec<Exam>> {
+        if !refresh && let Some(exams) = self.store.fresh_exams(number, self.now)? {
+            return Ok(exams);
+        }
+        let exams = self.tiss.exams(number)?;
+        self.store.save_exams(number, self.now, &exams)?;
+        Ok(exams)
+    }
 }
 
 fn ambiguous(query: &CourseQuery, candidates: &[Course]) -> Error {
@@ -108,32 +183,4 @@ fn ambiguous(query: &CourseQuery, candidates: &[Course]) -> Error {
         "\"{query}\" matches several courses, use the number:\n{}",
         list.join("\n")
     )
-}
-
-/// Reports every course it could not fetch, and still shows the exams of the others.
-fn list(tracked: &Tracked, tiss: &Tiss) -> ExitCode {
-    let courses = tracked.courses();
-    if courses.is_empty() {
-        println!("no courses tracked yet, start with: tiss add <course>");
-        return ExitCode::SUCCESS;
-    }
-    let mut exams = Vec::new();
-    let mut outcome = ExitCode::SUCCESS;
-    for course in courses {
-        match tiss.exams(&course.number) {
-            Ok(found) => exams.extend(found.into_iter().map(|e| (course.clone(), e))),
-            Err(error) => {
-                eprintln!("error: {course}: {error:#}");
-                outcome = ExitCode::FAILURE;
-            }
-        }
-    }
-    let now = Utc::now().fixed_offset();
-    let rows = upcoming(exams, now);
-    if rows.is_empty() {
-        println!("no upcoming exams");
-    } else {
-        print!("{}", render_exams(&rows, now));
-    }
-    outcome
 }

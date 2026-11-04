@@ -1,57 +1,254 @@
-//! The set of tracked courses, persisted as one JSON file.
+//! Everything tiss remembers, in one SQLite database.
+//! Each change runs in one transaction, so a crash leaves the old or the new state.
 
 use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::{fs, path::Path};
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use chrono::{DateTime, FixedOffset};
+use rusqlite::{Connection, OptionalExtension, Params, params};
+use serde::Deserialize;
 
-use crate::domain::{Course, CourseNumber};
+use crate::domain::{Course, CourseNumber, CourseQuery, Exam, Semester, exams_are_fresh};
 
-/// Keyed by number, so a course cannot be tracked twice.
-#[derive(Default, Serialize, Deserialize)]
-pub struct Tracked {
-    courses: BTreeMap<CourseNumber, String>,
+const SCHEMA: &str = "
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS tracked_course (
+    number TEXT PRIMARY KEY,
+    name TEXT NOT NULL
+);
+
+-- Courses TISS reported during a semester; they do not change until the next one.
+CREATE TABLE IF NOT EXISTS known_course (
+    semester TEXT NOT NULL,
+    number TEXT NOT NULL,
+    name TEXT NOT NULL,
+    PRIMARY KEY (semester, number)
+);
+
+CREATE TABLE IF NOT EXISTS search_hit (
+    semester TEXT NOT NULL,
+    term TEXT NOT NULL,
+    number TEXT NOT NULL,
+    PRIMARY KEY (semester, term, number),
+    FOREIGN KEY (semester, number) REFERENCES known_course ON DELETE CASCADE
+);
+
+-- A row means the exams were fetched then, even when the course has none.
+CREATE TABLE IF NOT EXISTS exam_fetch (
+    number TEXT PRIMARY KEY REFERENCES tracked_course ON DELETE CASCADE,
+    fetched_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS exam (
+    number TEXT NOT NULL REFERENCES exam_fetch ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    begins TEXT,
+    registration_end TEXT
+);
+";
+
+const DATABASE_FILE: &str = "tiss.db";
+const OLD_TRACKED_FILE: &str = "tracked.json";
+const IMPORTED_TRACKED_FILE: &str = "tracked.json.imported";
+
+pub struct Store {
+    db: Connection,
 }
 
-impl Tracked {
-    pub fn load(path: &Path) -> Result<Self> {
-        let context = || format!("cannot read {}", path.display());
-        match fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str(&text).with_context(context),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(error).with_context(context),
-        }
+impl Store {
+    pub fn open(directory: &Path) -> Result<Self> {
+        let path = directory.join(DATABASE_FILE);
+        let context = || format!("cannot open {}", path.display());
+        fs::create_dir_all(directory).with_context(context)?;
+        let db = Connection::open(&path).with_context(context)?;
+        db.execute_batch(SCHEMA).with_context(context)?;
+        let mut store = Self { db };
+        store.import_old_tracked(directory)?;
+        Ok(store)
     }
 
-    /// Replaces the file by rename, so a crash leaves the old or the new version, never half.
-    pub fn save(&self, path: &Path) -> Result<()> {
-        let context = || format!("cannot write {}", path.display());
-        if let Some(directory) = path.parent() {
-            fs::create_dir_all(directory).with_context(context)?;
+    /// Running it again after a crash before the rename imports the same courses once more.
+    fn import_old_tracked(&mut self, directory: &Path) -> Result<()> {
+        let path = directory.join(OLD_TRACKED_FILE);
+        let context = || format!("cannot read {}", path.display());
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error).with_context(context),
+        };
+        let old: OldTracked = serde_json::from_str(&text).with_context(context)?;
+        let transaction = self.db.transaction()?;
+        for (number, name) in &old.courses {
+            transaction.execute(
+                "INSERT OR IGNORE INTO tracked_course (number, name) VALUES (?1, ?2)",
+                params![number.compact(), name],
+            )?;
         }
-        let partial = path.with_extension("json.tmp");
-        fs::write(&partial, serde_json::to_string_pretty(self)?).with_context(context)?;
-        fs::rename(&partial, path).with_context(context)
+        transaction.commit()?;
+        fs::rename(&path, directory.join(IMPORTED_TRACKED_FILE)).with_context(context)
+    }
+
+    pub fn tracked_courses(&self) -> Result<Vec<Course>> {
+        self.courses(
+            "SELECT number, name FROM tracked_course ORDER BY number",
+            [],
+        )
     }
 
     /// Returns whether the course was new.
-    pub fn add(&mut self, course: Course) -> bool {
-        self.courses.insert(course.number, course.name).is_none()
+    pub fn track(&self, course: &Course) -> Result<bool> {
+        let added = self.db.execute(
+            "INSERT OR IGNORE INTO tracked_course (number, name) VALUES (?1, ?2)",
+            params![course.number.compact(), course.name],
+        )?;
+        Ok(added == 1)
     }
 
-    pub fn remove(&mut self, number: &CourseNumber) {
-        self.courses.remove(number);
+    /// Also forgets the stored exams of the course.
+    pub fn untrack(&self, number: &CourseNumber) -> Result<()> {
+        self.db.execute(
+            "DELETE FROM tracked_course WHERE number = ?1",
+            [number.compact()],
+        )?;
+        Ok(())
     }
 
-    pub fn courses(&self) -> Vec<Course> {
-        self.courses
-            .iter()
-            .map(|(number, name)| Course {
-                number: number.clone(),
-                name: name.clone(),
+    /// What is already known to answer a query, without asking TISS.
+    /// Empty when nothing is known, so a search that found nothing is asked again.
+    pub fn known_courses(&self, query: &CourseQuery, semester: Semester) -> Result<Vec<Course>> {
+        let semester = semester.to_string();
+        match query {
+            CourseQuery::Number(number) => self.courses(
+                "SELECT number, name FROM tracked_course WHERE number = ?1
+                 UNION ALL
+                 SELECT number, name FROM known_course WHERE number = ?1 AND semester = ?2
+                 LIMIT 1",
+                params![number.compact(), semester],
+            ),
+            CourseQuery::Name(_) => self.courses(
+                "SELECT number, name FROM search_hit JOIN known_course USING (semester, number)
+                 WHERE semester = ?1 AND term = ?2
+                 ORDER BY number",
+                params![semester, search_term(query)],
+            ),
+        }
+    }
+
+    /// Replaces the answer to a search, and drops what earlier semesters left behind.
+    pub fn save_search(
+        &mut self,
+        query: &CourseQuery,
+        semester: Semester,
+        courses: &[Course],
+    ) -> Result<()> {
+        let semester = semester.to_string();
+        let term = search_term(query);
+        let transaction = self.db.transaction()?;
+        transaction.execute("DELETE FROM known_course WHERE semester <> ?1", [&semester])?;
+        transaction.execute(
+            "DELETE FROM search_hit WHERE semester = ?1 AND term = ?2",
+            [&semester, &term],
+        )?;
+        for course in courses {
+            transaction.execute(
+                "INSERT INTO known_course (semester, number, name) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (semester, number) DO UPDATE SET name = excluded.name",
+                params![semester, course.number.compact(), course.name],
+            )?;
+            transaction.execute(
+                "INSERT INTO search_hit (semester, term, number) VALUES (?1, ?2, ?3)",
+                params![semester, term, course.number.compact()],
+            )?;
+        }
+        Ok(transaction.commit()?)
+    }
+
+    /// The stored exams of a course, unless they are missing or too old to trust at `now`.
+    pub fn fresh_exams(
+        &self,
+        number: &CourseNumber,
+        now: DateTime<FixedOffset>,
+    ) -> Result<Option<Vec<Exam>>> {
+        let fetched_at: Option<DateTime<FixedOffset>> = self
+            .db
+            .query_row(
+                "SELECT fetched_at FROM exam_fetch WHERE number = ?1",
+                [number.compact()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if !fetched_at.is_some_and(|fetched_at| exams_are_fresh(fetched_at, now)) {
+            return Ok(None);
+        }
+        let mut statement = self.db.prepare(
+            "SELECT title, begins, registration_end FROM exam WHERE number = ?1 ORDER BY rowid",
+        )?;
+        let exams = statement.query_map([number.compact()], |row| {
+            Ok(Exam {
+                title: row.get(0)?,
+                begins: row.get(1)?,
+                registration_end: row.get(2)?,
             })
-            .collect()
+        })?;
+        Ok(Some(exams.collect::<rusqlite::Result<_>>()?))
     }
+
+    /// Replaces the stored exams of a tracked course.
+    pub fn save_exams(
+        &mut self,
+        number: &CourseNumber,
+        fetched_at: DateTime<FixedOffset>,
+        exams: &[Exam],
+    ) -> Result<()> {
+        let transaction = self.db.transaction()?;
+        transaction.execute(
+            "DELETE FROM exam_fetch WHERE number = ?1",
+            [number.compact()],
+        )?;
+        transaction.execute(
+            "INSERT INTO exam_fetch (number, fetched_at) VALUES (?1, ?2)",
+            params![number.compact(), fetched_at],
+        )?;
+        for exam in exams {
+            transaction.execute(
+                "INSERT INTO exam (number, title, begins, registration_end)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    number.compact(),
+                    exam.title,
+                    exam.begins,
+                    exam.registration_end
+                ],
+            )?;
+        }
+        Ok(transaction.commit()?)
+    }
+
+    fn courses(&self, sql: &str, params: impl Params) -> Result<Vec<Course>> {
+        let mut statement = self.db.prepare(sql)?;
+        let rows = statement.query_map(params, |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.map(|row| {
+            let (number, name) = row?;
+            Ok(Course {
+                number: number.parse()?,
+                name,
+            })
+        })
+        .collect()
+    }
+}
+
+/// TISS searches ignore case, so spellings that differ only in case share one answer.
+fn search_term(query: &CourseQuery) -> String {
+    query.to_string().to_lowercase()
+}
+
+#[derive(Deserialize)]
+struct OldTracked {
+    courses: BTreeMap<CourseNumber, String>,
 }
