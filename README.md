@@ -22,6 +22,9 @@ tiss untrack 104.299            # stop tracking
 
 `add` still works for `track`, and `remove` and `rm` for `untrack`.
 
+In a terminal, `tiss list` cuts long course and exam names with `…` so rows fit its width. Piped
+output keeps them whole.
+
 When a name matches several courses, a checkbox list asks which you mean. `tiss untrack` without
 an argument asks the same about every tracked course. The keys are those of `jj restore -i`:
 

@@ -85,6 +85,15 @@ fn run(cli: Cli) -> Result<ExitCode> {
     }
 }
 
+/// Only a terminal has a width: piped output keeps every name whole. Some terminals report 0.
+fn terminal_width() -> Option<usize> {
+    if !io::stdout().is_terminal() {
+        return None;
+    }
+    let (columns, _) = crossterm::terminal::size().ok()?;
+    (columns > 0).then_some(columns.into())
+}
+
 /// `TISS_NOW` overrides the clock, because what is stored depends on when it was stored.
 fn now() -> Result<DateTime<FixedOffset>> {
     match env::var("TISS_NOW") {
@@ -191,7 +200,7 @@ impl App {
         if rows.is_empty() {
             println!("no upcoming exams");
         } else {
-            print!("{}", render_exams(&rows, self.now));
+            print!("{}", render_exams(&rows, self.now, terminal_width()));
         }
         Ok(outcome)
     }

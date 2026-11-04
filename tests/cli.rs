@@ -251,6 +251,29 @@ fn in_terminal(app: &App, args: &[&str], keys: &str) -> String {
     String::from_utf8(bytes).unwrap()
 }
 
+/// Runs `tiss list` in a terminal of the given width and returns what it printed.
+#[cfg(unix)]
+fn list_in_terminal_of_width(app: &App, columns: u16) -> String {
+    let mut command = Command::new("sh");
+    command
+        .args([
+            "-c",
+            &format!("stty cols {columns}; exec \"$0\" list"),
+            env!("CARGO_BIN_EXE_tiss"),
+        ])
+        .env("TISS_DATA_DIR", app.data.path())
+        .env("TISS_API_URL", &app.base);
+    let mut terminal = rexpect::session::spawn_command(command, Some(10_000)).unwrap();
+    // rexpect turns each byte into one char, which breaks anything beyond ASCII.
+    let bytes = terminal
+        .exp_eof()
+        .unwrap()
+        .chars()
+        .map(|c| c as u8)
+        .collect();
+    String::from_utf8(bytes).unwrap()
+}
+
 #[cfg(unix)]
 #[test]
 fn track_offers_every_candidate_and_tracks_the_one_checked() {
@@ -495,6 +518,43 @@ Exam date         Register by                Course                          Exa
 TBA               2099-05-03 10:00           104.299 VO Mathematik 2 für MB  No date yet
 ";
     assert_eq!(app.ok(&["list"]), expected);
+}
+
+const LONG_EXAM_TITLE: &str = "Schriftliche Prüfung zum Haupttermin im Wintersemester";
+
+fn long_exam() -> String {
+    format!(
+        r#"<tuvienna><exam id="1"><title>{LONG_EXAM_TITLE}</title><examinationBegin>2099-03-05T14:00:00.000+01:00</examinationBegin><applicationEnd>2099-03-03T10:00:00.000+01:00</applicationEnd></exam></tuvienna>"#
+    )
+}
+
+#[test]
+fn list_keeps_full_names_when_piped() {
+    let app = tracked_with_exams(&long_exam());
+    assert!(app.ok(&["list"]).contains(LONG_EXAM_TITLE));
+}
+
+#[cfg(unix)]
+#[test]
+fn list_fits_rows_to_the_terminal_width() {
+    let app = tracked_with_exams(&long_exam());
+    let printed = list_in_terminal_of_width(&app, 70);
+    assert!(printed.contains('…'), "{printed}");
+    assert!(!printed.contains(LONG_EXAM_TITLE), "{printed}");
+    assert!(
+        printed
+            .lines()
+            .all(|line| line.trim_end().chars().count() <= 70),
+        "{printed}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn list_keeps_full_names_when_the_terminal_reports_no_width() {
+    let app = tracked_with_exams(&long_exam());
+    let printed = list_in_terminal_of_width(&app, 0);
+    assert!(printed.contains(LONG_EXAM_TITLE), "{printed}");
 }
 
 #[test]
