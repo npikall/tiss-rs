@@ -121,7 +121,7 @@ impl App {
     fn track(&mut self, query: &CourseQuery, refresh: bool) -> Result<ExitCode> {
         let courses = match resolve(query, self.courses_matching(query, refresh)?) {
             Resolution::Found(course) => vec![course],
-            Resolution::NotFound => return Err(anyhow!("no course matches \"{query}\"")),
+            Resolution::NotFound => return Err(no_course_matches(query)),
             Resolution::Ambiguous(candidates) => select(&matches_several(query), &candidates)?,
         };
         if courses.is_empty() {
@@ -146,7 +146,12 @@ impl App {
                 return Ok(known);
             }
         }
-        let found = self.tiss.search(&query.to_string())?;
+        let mut found = self.tiss.search(&query.to_string())?;
+        if let CourseQuery::Number(number) = query
+            && !found.iter().any(|course| course.number == *number)
+        {
+            found.extend(self.tiss.last_offering(number, semester)?);
+        }
         self.store.save_search(query, semester, &found)?;
         Ok(found)
     }
@@ -228,6 +233,16 @@ fn select(title: &str, candidates: &[Course]) -> Result<Vec<Course>> {
     let labels = candidates.iter().map(Course::to_string).collect();
     let checked = picker::ask(title, labels)?;
     Ok(checked.iter().map(|&i| candidates[i].clone()).collect())
+}
+
+/// TISS search cannot find a course no longer offered by name, only its number reaches it.
+fn no_course_matches(query: &CourseQuery) -> anyhow::Error {
+    match query {
+        CourseQuery::Number(_) => anyhow!("no course matches \"{query}\""),
+        CourseQuery::Name(_) => anyhow!(
+            "no course matches \"{query}\", a course no longer offered needs its course number"
+        ),
+    }
 }
 
 fn matches_several(query: &CourseQuery) -> String {

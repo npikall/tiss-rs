@@ -1,6 +1,7 @@
 //! The TISS REST API. Responses are parsed into domain types here and nowhere else.
 
 use std::collections::BTreeMap;
+use std::iter;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
@@ -8,9 +9,11 @@ use chrono::{DateTime, FixedOffset};
 use serde::Deserialize;
 use ureq::Agent;
 
-use crate::domain::{Course, CourseNumber, Exam, parse_course_title};
+use crate::domain::{Course, CourseNumber, Exam, Semester, parse_course_title};
 
 const TIMEOUT: Duration = Duration::from_secs(15);
+/// Four years: exams of a course older than that are not worth a request per semester.
+const SEMESTERS_TO_LOOK_BACK: usize = 8;
 /// Beyond this a search means too many requests for a list nobody can choose from.
 const MAX_SEARCH_RESULTS: usize = 300;
 /// TISS answers 404 with this message prefix for a known course without exams.
@@ -77,6 +80,34 @@ impl Tiss {
         Ok(serde_json::from_str(&body)?)
     }
 
+    /// A course as it was last offered, up to `semester`. TISS search only knows current courses,
+    /// but a course no longer offered can still have exams.
+    pub fn last_offering(
+        &self,
+        number: &CourseNumber,
+        semester: Semester,
+    ) -> Result<Option<Course>> {
+        let semesters = iter::successors(Some(semester), |s| Some(s.previous()));
+        for semester in semesters.take(SEMESTERS_TO_LOOK_BACK) {
+            if let Some(course) = self.course_in(number, semester)? {
+                return Ok(Some(course));
+            }
+        }
+        Ok(None)
+    }
+
+    fn course_in(&self, number: &CourseNumber, semester: Semester) -> Result<Option<Course>> {
+        let url = format!("{}/course/{}-{semester}", self.base_url, number.compact());
+        let mut response = self.agent.get(&url).call()?;
+        let status = response.status().as_u16();
+        let body = response.body_mut().read_to_string()?;
+        match status {
+            200 => parse_course(number, &body).map(Some),
+            404 => Ok(None),
+            _ => bail!("TISS lookup of {number} in {semester} failed with status {status}"),
+        }
+    }
+
     /// The exams TISS lists for a course; a course without exams yields an empty list.
     pub fn exams(&self, number: &CourseNumber) -> Result<Vec<Exam>> {
         let url = format!("{}/course/{}/examDates", self.base_url, number.compact());
@@ -103,6 +134,23 @@ struct SearchResult {
 }
 
 #[derive(Deserialize)]
+struct CourseDocument {
+    course: CourseEntry,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CourseEntry {
+    course_type: String,
+    title: CourseTitle,
+}
+
+#[derive(Deserialize)]
+struct CourseTitle {
+    de: String,
+}
+
+#[derive(Deserialize)]
 struct ExamList {
     #[serde(default)]
     exam: Vec<ExamEntry>,
@@ -124,6 +172,15 @@ struct ErrorDocument {
 #[derive(Deserialize)]
 struct ErrorEntry {
     message: String,
+}
+
+/// Names the course the way search titles do: German title, course type in front.
+fn parse_course(number: &CourseNumber, xml: &str) -> Result<Course> {
+    let CourseDocument { course } = quick_xml::de::from_str(xml)?;
+    Ok(Course {
+        number: number.clone(),
+        name: format!("{} {}", course.course_type, course.title.de),
+    })
 }
 
 fn parse_exams(xml: &str) -> Result<Vec<Exam>> {

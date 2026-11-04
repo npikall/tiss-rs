@@ -29,6 +29,16 @@ fn search_page(total: usize, titles: &[&str]) -> String {
     )
 }
 
+/// Like TISS, knows no course in a semester unless told otherwise. Anything else is unexpected.
+fn unrouted_answer(path: &str) -> (u16, String) {
+    let is_course_in_semester = path.starts_with("/course/") && path.contains('-');
+    if is_course_in_semester {
+        (404, NO_COURSE.into())
+    } else {
+        (500, format!("unexpected request {path}"))
+    }
+}
+
 /// Serves canned `(status, body)` responses keyed by exact path and query.
 struct App {
     data: TempDir,
@@ -72,7 +82,7 @@ impl App {
                     .unwrap()
                     .get(&path)
                     .cloned()
-                    .unwrap_or((500, format!("unexpected request {path}")));
+                    .unwrap_or_else(|| unrouted_answer(&path));
                 write!(
                     stream,
                     "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -879,4 +889,98 @@ fn different_searches_keep_their_own_answers() {
     ]);
     assert!(app.ok(&["add", "Mathematik"]).contains("104.299"));
     assert!(app.ok(&["add", "Physik"]).contains("134.000"));
+}
+
+const UMGEBUNGSLAERM: &str = include_str!("fixtures/course_230054_2026S.xml");
+
+fn course_in(number: &str, semester: &str, status: u16, body: &str) -> Route {
+    (format!("/course/{number}-{semester}"), status, body.into())
+}
+
+fn no_longer_offered() -> Vec<Route> {
+    vec![
+        search("230054", 0, search_page(0, &[])),
+        course_in("230054", "2026S", 200, UMGEBUNGSLAERM),
+        exams("230054", 200, EXAMS),
+    ]
+}
+
+#[test]
+fn a_course_no_longer_offered_can_be_tracked_by_number_and_shows_its_exams() {
+    let app = App::new(no_longer_offered());
+    let output = app.ok_at(IN_WINTER, &["add", "230.054"]);
+    assert_eq!(output, "now tracking 230.054 VO Umgebungslärm\n");
+    assert_eq!(app.ok(&["courses"]), "230.054 VO Umgebungslärm\n");
+    assert!(app.ok_at(IN_WINTER, &["list"]).contains("Later exam"));
+}
+
+#[test]
+fn looking_back_stops_at_the_newest_semester_with_the_course() {
+    let app = App::new(no_longer_offered());
+    app.ok_at(IN_WINTER, &["add", "230054"]);
+    let requests = app.requests();
+    assert_eq!(requests.len(), 3, "{requests:?}");
+    assert_eq!(requests[1], "/course/230054-2026W");
+    assert_eq!(requests[2], "/course/230054-2026S");
+}
+
+#[test]
+fn a_course_no_longer_offered_is_known_for_the_rest_of_the_semester() {
+    let app = App::new(no_longer_offered());
+    app.ok_at(IN_WINTER, &["add", "230054"]);
+    app.ok_at(IN_WINTER, &["remove", "230054"]);
+    let before = app.requests().len();
+    let output = app.ok_at(LATER_IN_WINTER, &["add", "230054"]);
+    assert_eq!(output, "now tracking 230.054 VO Umgebungslärm\n");
+    assert_eq!(app.requests().len(), before);
+}
+
+#[test]
+fn search_hits_for_other_courses_do_not_stop_the_look_back() {
+    let mentions_it = search_page(1, &["206.333 VO Bauphysik, 2027S"]);
+    let app = App::new(vec![
+        search("230054", 0, mentions_it),
+        course_in("230054", "2026S", 200, UMGEBUNGSLAERM),
+    ]);
+    let output = app.ok_at(IN_WINTER, &["add", "230054"]);
+    assert_eq!(output, "now tracking 230.054 VO Umgebungslärm\n");
+}
+
+#[test]
+fn a_course_still_offered_needs_no_look_back() {
+    let app = App::new(vec![search("104299", 0, search_page(1, &[MATHE]))]);
+    app.ok_at(IN_WINTER, &["add", "104299"]);
+    assert_eq!(app.requests().len(), 1);
+}
+
+#[test]
+fn a_number_tiss_never_had_recently_is_not_found_after_a_bounded_look_back() {
+    let app = App::new(vec![search("999999", 0, search_page(0, &[]))]);
+    let mut command = app.command(&["add", "999999"]);
+    let output = command.env("TISS_NOW", IN_WINTER).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("no course matches"), "{output:?}");
+    assert_eq!(app.requests().len(), 1 + 8);
+}
+
+#[test]
+fn a_failing_look_back_reports_the_error_and_tracks_nothing() {
+    let app = App::new(vec![
+        search("230054", 0, search_page(0, &[])),
+        course_in("230054", "2026W", 503, "down"),
+    ]);
+    let mut command = app.command(&["add", "230054"]);
+    let output = command.env("TISS_NOW", IN_WINTER).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(&output).contains("503"), "{output:?}");
+    assert_eq!(app.ok(&["courses"]), "");
+}
+
+#[test]
+fn a_name_search_without_a_match_points_to_the_course_number() {
+    let others = search_page(1, &["206.333 VO Bauphysik, 2027S"]);
+    let app = App::new(vec![search("Umgebungsl%C3%A4rm", 0, others)]);
+    let message = app.err(&["add", "Umgebungslärm"]);
+    assert!(message.contains("no course matches"), "{message}");
+    assert!(message.contains("course number"), "{message}");
 }

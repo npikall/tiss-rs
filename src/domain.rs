@@ -155,6 +155,13 @@ impl Semester {
             _ => Self::Winter(moment.year()),
         }
     }
+
+    pub fn previous(self) -> Self {
+        match self {
+            Self::Summer(year) => Self::Winter(year - 1),
+            Self::Winter(year) => Self::Summer(year),
+        }
+    }
 }
 
 impl fmt::Display for Semester {
@@ -284,6 +291,12 @@ mod tests {
 
     fn titles(rows: &[(Course, Exam)]) -> Vec<&str> {
         rows.iter().map(|(_, e)| e.title.as_str()).collect()
+    }
+
+    #[test]
+    fn the_semester_before_summer_is_last_years_winter_and_before_winter_this_summer() {
+        assert_eq!(Semester::Summer(2027).previous(), Semester::Winter(2026));
+        assert_eq!(Semester::Winter(2026).previous(), Semester::Summer(2026));
     }
 
     #[test]
