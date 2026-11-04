@@ -187,14 +187,18 @@ pub fn upcoming(mut exams: Vec<(Course, Exam)>, now: DateTime<FixedOffset>) -> V
 /// Below this a course cell says too little, so the table wraps instead.
 const COURSE_COLUMN_MIN: usize = 12;
 const COLUMN_GAPS: usize = 2 * 2;
+/// Characters in a formatted moment, so that gaps line up under each other.
+const MOMENT_WIDTH: usize = "YYYY-MM-DD HH:MM".len();
+/// Exam gaps of at least this many days are shown in weeks.
+const DAYS_SHOWN_AS_DAYS: i64 = 14;
 
 /// Headings look the same in the help and in tables.
 pub const HEADING: Style = AnsiColor::Yellow.on_default().bold();
-const EXAM_DATE: Style = Style::new().bold();
-const COURSE_NUMBER: Style = AnsiColor::Cyan.on_default();
+// Columns are colored like `git lr`: hash, time, author, with refs' red for closed deadlines.
+const EXAM_DATE: Style = AnsiColor::Yellow.on_default();
 const REGISTRATION_OPEN: Style = AnsiColor::Green.on_default();
+const COURSE_NUMBER: Style = AnsiColor::Blue.on_default().bold();
 const REGISTRATION_CLOSED: Style = AnsiColor::Red.on_default();
-const UNKNOWN: Style = Style::new().dimmed();
 
 struct Cell {
     text: String,
@@ -217,11 +221,12 @@ pub fn render_exams(
     color: bool,
 ) -> String {
     let header = ["Exam date", "Register by", "Course"].map(|title| Cell::new(title, HEADING));
+    let gaps = exam_gaps(exams, now);
     let rows: Vec<[Cell; 3]> = std::iter::once(header)
-        .chain(exams.iter().map(|(course, exam)| {
+        .chain(exams.iter().zip(gaps).map(|((course, exam), gap)| {
             [
                 date_cell(exam.begins),
-                deadline_cell(exam.registration_end, now),
+                deadline_cell(exam.registration_end, now, gap),
                 Cell::new(course.to_string(), COURSE_NUMBER),
             ]
         }))
@@ -279,20 +284,51 @@ fn format_moment(moment: DateTime<FixedOffset>) -> String {
 
 fn date_cell(begins: Option<DateTime<FixedOffset>>) -> Cell {
     match begins {
-        None => Cell::new("TBA", UNKNOWN),
+        None => Cell::new("TBA", EXAM_DATE),
         Some(begins) => Cell::new(format_moment(begins), EXAM_DATE),
     }
 }
 
-fn deadline_cell(end: Option<DateTime<FixedOffset>>, now: DateTime<FixedOffset>) -> Cell {
-    match end {
-        None => Cell::new("-", UNKNOWN),
-        Some(end) if end < now => Cell::new(
-            format!("{} (closed)", format_moment(end)),
-            REGISTRATION_CLOSED,
-        ),
-        Some(end) => Cell::new(format_moment(end), REGISTRATION_OPEN),
+/// How long after the exam before each exam is, or after `now` for the first.
+/// Exams without a date have no gap and are skipped when looking for the exam before.
+fn exam_gaps(exams: &[(Course, Exam)], now: DateTime<FixedOffset>) -> Vec<Option<String>> {
+    let mut before = now;
+    exams
+        .iter()
+        .map(|(_, exam)| {
+            let begins = exam.begins?;
+            let day_before = before.with_timezone(begins.offset()).date_naive();
+            before = begins;
+            Some(format_gap((begins.date_naive() - day_before).num_days()))
+        })
+        .collect()
+}
+
+fn format_gap(days: i64) -> String {
+    if days < DAYS_SHOWN_AS_DAYS {
+        format!("{days}d")
+    } else {
+        format!("{}w", days / 7)
     }
+}
+
+fn deadline_cell(
+    end: Option<DateTime<FixedOffset>>,
+    now: DateTime<FixedOffset>,
+    gap: Option<String>,
+) -> Cell {
+    let moment = end.map_or("-".into(), format_moment);
+    let text = match gap {
+        Some(gap) => format!("{moment:<MOMENT_WIDTH$} {gap}"),
+        None => moment,
+    };
+    let closed = end.is_some_and(|end| end < now);
+    let style = if closed {
+        REGISTRATION_CLOSED
+    } else {
+        REGISTRATION_OPEN
+    };
+    Cell::new(text, style)
 }
 
 #[cfg(test)]
@@ -496,10 +532,10 @@ mod tests {
             (course("185A91", "VU Longer"), exam("Unknown", None, None)),
         ];
         let expected = "\
-Exam date         Register by                Course
-2026-07-01 14:00  2026-06-29 10:00           104.299 VO X
-2026-07-02 09:30  2026-05-30 10:00 (closed)  185.A91 VU Longer
-TBA               -                          185.A91 VU Longer
+Exam date         Register by          Course
+2026-07-01 14:00  2026-06-29 10:00 4w  104.299 VO X
+2026-07-02 09:30  2026-05-30 10:00 1d  185.A91 VU Longer
+TBA               -                    185.A91 VU Longer
 ";
         assert_eq!(plain(&rows, None), expected);
     }
@@ -567,17 +603,17 @@ TBA        -            104.299 VO Mathemat…
         ];
         let expected = concat!(
             "\x1b[1m\x1b[33mExam date       \x1b[0m  ",
-            "\x1b[1m\x1b[33mRegister by              \x1b[0m  ",
+            "\x1b[1m\x1b[33mRegister by        \x1b[0m  ",
             "\x1b[1m\x1b[33mCourse\x1b[0m\n",
-            "\x1b[1m2026-07-01 10:00\x1b[0m  ",
-            "\x1b[32m2026-09-01 10:00         \x1b[0m  ",
-            "\x1b[36m104.299\x1b[0m VO X\n",
-            "\x1b[2mTBA             \x1b[0m  ",
-            "\x1b[31m2026-05-01 10:00 (closed)\x1b[0m  ",
-            "\x1b[36m185.A91\x1b[0m VU Y\n",
-            "\x1b[2mTBA             \x1b[0m  ",
-            "\x1b[2m-                        \x1b[0m  ",
-            "\x1b[36m185.A91\x1b[0m VU Y\n",
+            "\x1b[33m2026-07-01 10:00\x1b[0m  ",
+            "\x1b[32m2026-09-01 10:00 4w\x1b[0m  ",
+            "\x1b[1m\x1b[34m104.299\x1b[0m VO X\n",
+            "\x1b[33mTBA             \x1b[0m  ",
+            "\x1b[31m2026-05-01 10:00   \x1b[0m  ",
+            "\x1b[1m\x1b[34m185.A91\x1b[0m VU Y\n",
+            "\x1b[33mTBA             \x1b[0m  ",
+            "\x1b[32m-                  \x1b[0m  ",
+            "\x1b[1m\x1b[34m185.A91\x1b[0m VU Y\n",
         );
         assert_eq!(render_exams(&rows, at(NOW), None, true), expected);
     }
@@ -591,6 +627,92 @@ TBA        -            104.299 VO Mathemat…
     #[test]
     fn deadline_exactly_now_is_still_open() {
         let rows = vec![(course("104299", "VO X"), exam("E", None, Some(NOW)))];
-        assert!(!plain(&rows, None).contains("closed"));
+        let colored = render_exams(&rows, at(NOW), None, true);
+        assert!(!colored.contains("\x1b[31m"), "{colored:?}");
+    }
+
+    /// The text after the deadline in each data row, for exams on these dates.
+    fn gaps(now: &str, dates: &[Option<&str>]) -> Vec<String> {
+        let rows: Vec<_> = dates
+            .iter()
+            .map(|&date| (course("104299", "VO X"), exam("E", date, Some(LATER))))
+            .collect();
+        render_exams(&rows, at(now), None, false)
+            .lines()
+            .skip(1)
+            .map(|line| {
+                let cell = line.split("  ").nth(1).unwrap();
+                cell.split(' ').nth(2).unwrap_or("").to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn gap_of_the_first_exam_counts_from_today() {
+        assert_eq!(gaps(NOW, &[Some("2026-06-13T10:00:00+02:00")]), ["12d"]);
+    }
+
+    #[test]
+    fn gap_of_later_exams_counts_from_the_exam_before() {
+        let dates = [
+            Some("2026-06-03T10:00:00+02:00"),
+            Some("2026-06-10T10:00:00+02:00"),
+        ];
+        assert_eq!(gaps(NOW, &dates), ["2d", "7d"]);
+    }
+
+    #[test]
+    fn gap_is_in_days_below_two_weeks_then_in_whole_weeks() {
+        let gap = |date| gaps(NOW, &[Some(date)]).remove(0);
+        assert_eq!(gap("2026-06-14T10:00:00+02:00"), "13d");
+        assert_eq!(gap("2026-06-15T10:00:00+02:00"), "2w");
+        assert_eq!(gap("2026-06-21T10:00:00+02:00"), "2w");
+        assert_eq!(gap("2026-06-22T10:00:00+02:00"), "3w");
+    }
+
+    #[test]
+    fn gap_counts_calendar_days_not_elapsed_time() {
+        let dates = [
+            Some("2026-06-01T23:00:00+02:00"),
+            Some("2026-06-01T23:30:00+02:00"),
+            Some("2026-06-02T00:30:00+02:00"),
+        ];
+        assert_eq!(gaps(NOW, &dates), ["0d", "0d", "1d"]);
+    }
+
+    #[test]
+    fn gap_reads_today_in_the_time_zone_of_the_exam() {
+        // Still June 1st in UTC, already June 2nd in Vienna, where the exam is.
+        let dates = [Some("2026-06-02T10:00:00+02:00")];
+        assert_eq!(gaps("2026-06-01T23:30:00+00:00", &dates), ["0d"]);
+    }
+
+    #[test]
+    fn exam_without_a_date_has_no_gap_and_does_not_count_as_the_exam_before() {
+        let dates = [
+            Some("2026-06-03T10:00:00+02:00"),
+            None,
+            Some("2026-06-05T10:00:00+02:00"),
+        ];
+        assert_eq!(gaps(NOW, &dates), ["2d", "", "2d"]);
+    }
+
+    #[test]
+    fn gap_lines_up_when_the_exam_has_no_deadline() {
+        let rows = vec![
+            (course("104299", "VO X"), exam("E", Some(SOON), None)),
+            (
+                course("104299", "VO X"),
+                exam("E", Some(LATER), Some(LATER)),
+            ),
+        ];
+        let rendered = plain(&rows, None);
+        let column = |line: &str| line.rfind('w').unwrap();
+        let mut data = rendered.lines().skip(1);
+        assert_eq!(
+            column(data.next().unwrap()),
+            column(data.next().unwrap()),
+            "{rendered}"
+        );
     }
 }

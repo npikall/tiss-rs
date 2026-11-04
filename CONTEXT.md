@@ -9,5 +9,6 @@
 - **Semester**: `2027S` runs March to September 2027, `2026W` runs October 2026 to February 2027. Courses do not change within one.
 - **Fresh exams**: stored exams less than an hour old, shown without asking TISS.
 - **Exam date**: when the exam begins (`examinationBegin`). TISS omits it for some exams, shown as `TBA`.
-- **Registration deadline**: last moment to register (`applicationEnd`). Shown as `(closed)` once passed.
+- **Registration deadline**: last moment to register (`applicationEnd`). Shown in red once passed.
+- **Exam gap**: calendar days from the exam before to this one, or from today for the first. Shown as `12d` below 14 days, then in whole weeks as `3w`. Exams without a date have none.
 - **Upcoming exam**: an exam whose date, or registration deadline if it has no date, is not in the past.
