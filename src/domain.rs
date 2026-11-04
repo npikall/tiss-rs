@@ -5,6 +5,7 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Datelike, FixedOffset, TimeDelta};
+use clap::builder::styling::{AnsiColor, Style};
 use serde::Deserialize;
 
 /// TISS course number in canonical form: three digits, then three alphanumerics.
@@ -183,57 +184,84 @@ pub fn upcoming(mut exams: Vec<(Course, Exam)>, now: DateTime<FixedOffset>) -> V
     exams
 }
 
-/// Below this a course or exam cell says too little, so the table wraps instead.
-const TEXT_COLUMN_MIN: usize = 12;
-const COLUMN_GAPS: usize = 3 * 2;
+/// Below this a course cell says too little, so the table wraps instead.
+const COURSE_COLUMN_MIN: usize = 12;
+const COLUMN_GAPS: usize = 2 * 2;
+
+/// Headings look the same in the help and in tables.
+pub const HEADING: Style = AnsiColor::Yellow.on_default().bold();
+const EXAM_DATE: Style = Style::new().bold();
+const COURSE_NUMBER: Style = AnsiColor::Cyan.on_default();
+const REGISTRATION_OPEN: Style = AnsiColor::Green.on_default();
+const REGISTRATION_CLOSED: Style = AnsiColor::Red.on_default();
+const UNKNOWN: Style = Style::new().dimmed();
+
+struct Cell {
+    text: String,
+    style: Style,
+}
+
+impl Cell {
+    fn new(text: impl Into<String>, style: Style) -> Self {
+        let text = text.into();
+        Self { text, style }
+    }
+}
 
 /// Renders exams as aligned columns, marking registration deadlines that have passed.
-/// Given a width, course and exam text is shortened so that rows fit it.
+/// Given a width, course text is shortened so that rows fit it.
 pub fn render_exams(
     exams: &[(Course, Exam)],
     now: DateTime<FixedOffset>,
     terminal_width: Option<usize>,
+    color: bool,
 ) -> String {
-    let header = ["Exam date", "Register by", "Course", "Exam"].map(String::from);
-    let rows: Vec<[String; 4]> = std::iter::once(header)
+    let header = ["Exam date", "Register by", "Course"].map(|title| Cell::new(title, HEADING));
+    let rows: Vec<[Cell; 3]> = std::iter::once(header)
         .chain(exams.iter().map(|(course, exam)| {
             [
-                exam.begins.map_or("TBA".into(), format_moment),
+                date_cell(exam.begins),
                 deadline_cell(exam.registration_end, now),
-                course.to_string(),
-                exam.title.clone(),
+                Cell::new(course.to_string(), COURSE_NUMBER),
             ]
         }))
         .collect();
     let width = |column: usize| {
         rows.iter()
-            .map(|row| row[column].chars().count())
+            .map(|row| row[column].text.chars().count())
             .max()
             .unwrap_or(0)
     };
     let (date, deadline) = (width(0), width(1));
-    let (course, exam) = match terminal_width {
-        Some(total) => {
-            let room = total.saturating_sub(date + deadline + COLUMN_GAPS);
-            text_column_widths(width(2), width(3), room)
-        }
-        None => (width(2), width(3)),
+    let course = terminal_width.map_or(width(2), |total| {
+        let room = total.saturating_sub(date + deadline + COLUMN_GAPS);
+        width(2).min(room.max(COURSE_COLUMN_MIN))
+    });
+    let padded = |cell: &Cell, width: usize| {
+        let text = format!("{:<width$}", cell.text);
+        painted(&text, cell.style, color)
     };
     rows.iter()
-        .map(|[a, b, c, d]| {
-            let (c, d) = (capped(c, course), capped(d, exam));
-            format!("{a:<date$}  {b:<deadline$}  {c:<course$}  {d}\n")
+        .map(|[a, b, c]| {
+            let text = capped(&c.text, course);
+            // Only the course number stands out, the name is what is left of it.
+            let (first_word, rest) = text.split_at(text.find(' ').unwrap_or(text.len()));
+            let first_word = painted(first_word, c.style, color);
+            format!(
+                "{}  {}  {first_word}{rest}\n",
+                padded(a, date),
+                padded(b, deadline)
+            )
         })
         .collect()
 }
 
-/// Shares `room` between the two text columns: each may have half, and what one does not need
-/// goes to the other.
-fn text_column_widths(course: usize, exam: usize, room: usize) -> (usize, usize) {
-    let room = room.max(2 * TEXT_COLUMN_MIN);
-    let exam_share = exam.min(room / 2);
-    let course = course.min(room - exam_share);
-    (course, exam.min(room - course))
+fn painted(text: &str, style: Style, color: bool) -> String {
+    if color {
+        format!("{style}{text}{style:#}")
+    } else {
+        text.into()
+    }
 }
 
 /// Cuts `text` to at most `max` characters, ending in an ellipsis if anything was lost.
@@ -249,11 +277,21 @@ fn format_moment(moment: DateTime<FixedOffset>) -> String {
     moment.format("%Y-%m-%d %H:%M").to_string()
 }
 
-fn deadline_cell(end: Option<DateTime<FixedOffset>>, now: DateTime<FixedOffset>) -> String {
+fn date_cell(begins: Option<DateTime<FixedOffset>>) -> Cell {
+    match begins {
+        None => Cell::new("TBA", UNKNOWN),
+        Some(begins) => Cell::new(format_moment(begins), EXAM_DATE),
+    }
+}
+
+fn deadline_cell(end: Option<DateTime<FixedOffset>>, now: DateTime<FixedOffset>) -> Cell {
     match end {
-        None => "-".into(),
-        Some(end) if end < now => format!("{} (closed)", format_moment(end)),
-        Some(end) => format_moment(end),
+        None => Cell::new("-", UNKNOWN),
+        Some(end) if end < now => Cell::new(
+            format!("{} (closed)", format_moment(end)),
+            REGISTRATION_CLOSED,
+        ),
+        Some(end) => Cell::new(format_moment(end), REGISTRATION_OPEN),
     }
 }
 
@@ -458,32 +496,23 @@ mod tests {
             (course("185A91", "VU Longer"), exam("Unknown", None, None)),
         ];
         let expected = "\
-Exam date         Register by                Course             Exam
-2026-07-01 14:00  2026-06-29 10:00           104.299 VO X       Open
-2026-07-02 09:30  2026-05-30 10:00 (closed)  185.A91 VU Longer  Shut
-TBA               -                          185.A91 VU Longer  Unknown
+Exam date         Register by                Course
+2026-07-01 14:00  2026-06-29 10:00           104.299 VO X
+2026-07-02 09:30  2026-05-30 10:00 (closed)  185.A91 VU Longer
+TBA               -                          185.A91 VU Longer
 ";
-        assert_eq!(render_exams(&rows, at(NOW), None), expected);
-    }
-
-    #[test]
-    fn render_aligns_on_characters_not_bytes() {
-        let rows = vec![
-            (course("104299", "VO Prüfüng"), exam("Zed", None, None)),
-            (course("104300", "VO Pruefung"), exam("Yak", None, None)),
-        ];
-        let rendered = render_exams(&rows, at(NOW), None);
-        let column = |line: &str, needle: char| line.chars().position(|c| c == needle);
-        let lines: Vec<_> = rendered.lines().collect();
-        assert_eq!(column(lines[1], 'Z'), column(lines[2], 'Y'));
+        assert_eq!(plain(&rows, None), expected);
     }
 
     const LONG_COURSE: &str =
         "VO Mathematik 2 für Maschinenbau, Wirtschaftsingenieurwesen und Verfahrenstechnik";
-    const LONG_EXAM: &str = "Schriftliche Prüfung zum Haupttermin im Wintersemester";
 
-    fn one_row(name: &str, title: &str) -> Vec<(Course, Exam)> {
-        vec![(course("104299", name), exam(title, None, None))]
+    fn one_row(name: &str) -> Vec<(Course, Exam)> {
+        vec![(course("104299", name), exam("Title", None, None))]
+    }
+
+    fn plain(rows: &[(Course, Exam)], width: Option<usize>) -> String {
+        render_exams(rows, at(NOW), width, false)
     }
 
     fn data_line(rendered: &str) -> &str {
@@ -491,64 +520,77 @@ TBA               -                          185.A91 VU Longer  Unknown
     }
 
     #[test]
+    fn render_does_not_show_the_exam_title() {
+        let rendered = plain(&one_row("VO X"), None);
+        assert!(!rendered.contains("Title"), "{rendered}");
+    }
+
+    #[test]
     fn render_without_a_width_cuts_nothing() {
-        let rendered = render_exams(&one_row(LONG_COURSE, LONG_EXAM), at(NOW), None);
+        let rendered = plain(&one_row(LONG_COURSE), None);
         assert!(rendered.contains(LONG_COURSE), "{rendered}");
-        assert!(rendered.contains(LONG_EXAM), "{rendered}");
     }
 
     #[test]
-    fn render_splits_a_tight_width_evenly_and_marks_the_cut() {
-        let rows = one_row(LONG_COURSE, LONG_EXAM);
+    fn render_cuts_the_course_to_the_width_and_marks_the_cut() {
         let expected = "\
-Exam date  Register by  Course                Exam
-TBA        -            104.299 VO Mathemat…  Schriftliche Prüfun…
+Exam date  Register by  Course
+TBA        -            104.299 VO Mathemat…
 ";
-        assert_eq!(render_exams(&rows, at(NOW), Some(66)), expected);
+        assert_eq!(plain(&one_row(LONG_COURSE), Some(44)), expected);
     }
 
     #[test]
-    fn render_gives_room_a_short_course_leaves_to_the_exam() {
-        let rendered = render_exams(&one_row("VO X", LONG_EXAM), at(NOW), Some(60));
-        assert!(
-            data_line(&rendered).ends_with("104.299 VO X  Schriftliche Prüfung …"),
-            "{rendered}"
-        );
-    }
-
-    #[test]
-    fn render_gives_room_a_short_exam_leaves_to_the_course() {
-        let rendered = render_exams(&one_row(LONG_COURSE, "Yak"), at(NOW), Some(60));
-        assert!(
-            data_line(&rendered).ends_with("104.299 VO Mathematik 2 für M…  Yak"),
-            "{rendered}"
-        );
-    }
-
-    #[test]
-    fn render_cuts_only_once_the_row_no_longer_fits() {
-        let rows = one_row(&"x".repeat(32), &"y".repeat(30));
-        // Dates 9 + 11, course 40, exam 30, three gaps of 2.
-        let fitting = render_exams(&rows, at(NOW), Some(96));
+    fn render_cuts_only_once_the_row_no_longer_fits_counting_characters() {
+        let rows = one_row(&"ü".repeat(32));
+        // Dates 9 + 11, course 40, two gaps of 2.
+        let fitting = plain(&rows, Some(64));
         assert!(!fitting.contains('…'), "{fitting}");
-        assert_eq!(data_line(&fitting).chars().count(), 96);
-        let tight = render_exams(&rows, at(NOW), Some(95));
+        assert_eq!(data_line(&fitting).chars().count(), 64);
+        let tight = plain(&rows, Some(63));
         assert!(tight.contains('…'), "{tight}");
-        assert_eq!(data_line(&tight).chars().count(), 95);
+        assert_eq!(data_line(&tight).chars().count(), 63);
     }
 
     #[test]
-    fn render_keeps_text_readable_in_a_very_narrow_terminal() {
-        let rendered = render_exams(&one_row(LONG_COURSE, LONG_EXAM), at(NOW), Some(10));
-        assert!(
-            data_line(&rendered).ends_with("104.299 VO …  Schriftlich…"),
-            "{rendered}"
+    fn render_keeps_the_course_readable_in_a_very_narrow_terminal() {
+        let rendered = plain(&one_row(LONG_COURSE), Some(10));
+        assert!(data_line(&rendered).ends_with("104.299 VO …"), "{rendered}");
+    }
+
+    #[test]
+    fn color_marks_header_course_number_and_each_kind_of_cell() {
+        let rows = vec![
+            (course("104299", "VO X"), exam("E", Some(SOON), Some(LATER))),
+            (course("185A91", "VU Y"), exam("E", None, Some(PAST))),
+            (course("185A91", "VU Y"), exam("E", None, None)),
+        ];
+        let expected = concat!(
+            "\x1b[1m\x1b[33mExam date       \x1b[0m  ",
+            "\x1b[1m\x1b[33mRegister by              \x1b[0m  ",
+            "\x1b[1m\x1b[33mCourse\x1b[0m\n",
+            "\x1b[1m2026-07-01 10:00\x1b[0m  ",
+            "\x1b[32m2026-09-01 10:00         \x1b[0m  ",
+            "\x1b[36m104.299\x1b[0m VO X\n",
+            "\x1b[2mTBA             \x1b[0m  ",
+            "\x1b[31m2026-05-01 10:00 (closed)\x1b[0m  ",
+            "\x1b[36m185.A91\x1b[0m VU Y\n",
+            "\x1b[2mTBA             \x1b[0m  ",
+            "\x1b[2m-                        \x1b[0m  ",
+            "\x1b[36m185.A91\x1b[0m VU Y\n",
         );
+        assert_eq!(render_exams(&rows, at(NOW), None, true), expected);
+    }
+
+    #[test]
+    fn color_does_not_change_where_a_row_is_cut() {
+        let colored = render_exams(&one_row(LONG_COURSE), at(NOW), Some(44), true);
+        assert!(data_line(&colored).ends_with(" VO Mathemat…"), "{colored}");
     }
 
     #[test]
     fn deadline_exactly_now_is_still_open() {
         let rows = vec![(course("104299", "VO X"), exam("E", None, Some(NOW)))];
-        assert!(!render_exams(&rows, at(NOW), None).contains("closed"));
+        assert!(!plain(&rows, None).contains("closed"));
     }
 }

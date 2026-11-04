@@ -261,9 +261,15 @@ fn in_terminal(app: &App, args: &[&str], keys: &str) -> String {
     String::from_utf8(bytes).unwrap()
 }
 
-/// Runs `tiss list` in a terminal of the given width and returns what it printed.
+/// Width tests count characters, so they run without colors.
 #[cfg(unix)]
 fn list_in_terminal_of_width(app: &App, columns: u16) -> String {
+    list_in_terminal(app, columns, Some("1"))
+}
+
+/// Runs `tiss list` in a terminal of the given width and returns what it printed.
+#[cfg(unix)]
+fn list_in_terminal(app: &App, columns: u16, no_color: Option<&str>) -> String {
     let mut command = Command::new("sh");
     command
         .args([
@@ -272,7 +278,11 @@ fn list_in_terminal_of_width(app: &App, columns: u16) -> String {
             env!("CARGO_BIN_EXE_tiss"),
         ])
         .env("TISS_DATA_DIR", app.data.path())
-        .env("TISS_API_URL", &app.base);
+        .env("TISS_API_URL", &app.base)
+        .env_remove("NO_COLOR");
+    if let Some(value) = no_color {
+        command.env("NO_COLOR", value);
+    }
     let mut terminal = rexpect::session::spawn_command(command, Some(10_000)).unwrap();
     // rexpect turns each byte into one char, which breaks anything beyond ASCII.
     let bytes = terminal
@@ -522,39 +532,33 @@ fn list_shows_upcoming_exams_with_deadlines_sorted_by_date() {
     ]);
     app.ok(&["add", "104299"]);
     let expected = "\
-Exam date         Register by                Course                          Exam
-2099-01-08 14:00  2000-01-06 10:00 (closed)  104.299 VO Mathematik 2 für MB  Deadline gone
-2099-03-05 14:00  2099-03-03 10:00           104.299 VO Mathematik 2 für MB  Later exam
-TBA               2099-05-03 10:00           104.299 VO Mathematik 2 für MB  No date yet
+Exam date         Register by                Course
+2099-01-08 14:00  2000-01-06 10:00 (closed)  104.299 VO Mathematik 2 für MB
+2099-03-05 14:00  2099-03-03 10:00           104.299 VO Mathematik 2 für MB
+TBA               2099-05-03 10:00           104.299 VO Mathematik 2 für MB
 ";
     assert_eq!(app.ok(&["list"]), expected);
 }
 
-const LONG_EXAM_TITLE: &str = "Schriftliche Prüfung zum Haupttermin im Wintersemester";
-
-fn long_exam() -> String {
-    format!(
-        r#"<tuvienna><exam id="1"><title>{LONG_EXAM_TITLE}</title><examinationBegin>2099-03-05T14:00:00.000+01:00</examinationBegin><applicationEnd>2099-03-03T10:00:00.000+01:00</applicationEnd></exam></tuvienna>"#
-    )
-}
+const COURSE_NAME: &str = "VO Mathematik 2 für MB";
 
 #[test]
 fn list_keeps_full_names_when_piped() {
-    let app = tracked_with_exams(&long_exam());
-    assert!(app.ok(&["list"]).contains(LONG_EXAM_TITLE));
+    let app = tracked_with_exams(ONE_EXAM);
+    assert!(app.ok(&["list"]).contains(COURSE_NAME));
 }
 
 #[cfg(unix)]
 #[test]
 fn list_fits_rows_to_the_terminal_width() {
-    let app = tracked_with_exams(&long_exam());
-    let printed = list_in_terminal_of_width(&app, 70);
+    let app = tracked_with_exams(ONE_EXAM);
+    let printed = list_in_terminal_of_width(&app, 50);
     assert!(printed.contains('…'), "{printed}");
-    assert!(!printed.contains(LONG_EXAM_TITLE), "{printed}");
+    assert!(!printed.contains(COURSE_NAME), "{printed}");
     assert!(
         printed
             .lines()
-            .all(|line| line.trim_end().chars().count() <= 70),
+            .all(|line| line.trim_end().chars().count() <= 50),
         "{printed}"
     );
 }
@@ -562,9 +566,39 @@ fn list_fits_rows_to_the_terminal_width() {
 #[cfg(unix)]
 #[test]
 fn list_keeps_full_names_when_the_terminal_reports_no_width() {
-    let app = tracked_with_exams(&long_exam());
+    let app = tracked_with_exams(ONE_EXAM);
     let printed = list_in_terminal_of_width(&app, 0);
-    assert!(printed.contains(LONG_EXAM_TITLE), "{printed}");
+    assert!(printed.contains(COURSE_NAME), "{printed}");
+}
+
+#[cfg(unix)]
+#[test]
+fn list_is_colored_in_a_terminal() {
+    let app = tracked_with_exams(ONE_EXAM);
+    let printed = list_in_terminal(&app, 100, None);
+    assert!(printed.contains("\x1b[36m104.299\x1b[0m"), "{printed:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn list_ignores_an_empty_no_color() {
+    let app = tracked_with_exams(ONE_EXAM);
+    assert!(list_in_terminal(&app, 100, Some("")).contains('\x1b'));
+}
+
+#[cfg(unix)]
+#[test]
+fn list_respects_no_color() {
+    let app = tracked_with_exams(ONE_EXAM);
+    let printed = list_in_terminal(&app, 100, Some("1"));
+    assert!(!printed.contains('\x1b'), "{printed:?}");
+    assert!(printed.contains("104.299"), "{printed}");
+}
+
+#[test]
+fn list_is_not_colored_when_piped() {
+    let app = tracked_with_exams(ONE_EXAM);
+    assert!(!app.ok(&["list"]).contains('\x1b'));
 }
 
 #[test]
@@ -600,7 +634,7 @@ fn list_reports_failed_course_but_still_shows_the_others() {
     app.ok(&["add", "999999"]);
     let output = app.tiss(&["list"]);
     assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("Later exam"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("2099-03-05 14:00"));
     assert!(stderr(&output).contains("Course not found for 999999."));
 }
 
@@ -803,7 +837,7 @@ fn list_shows_stored_exams_exactly_as_fetched_within_the_hour() {
     let app = tracked_with_exams(EXAMS);
     let first = app.ok_at(IN_WINTER, &["list"]);
     let second = app.ok_at(WITHIN_THE_HOUR, &["list"]);
-    assert!(first.contains("Later exam"), "{first}");
+    assert!(first.contains("2099-03-05 14:00"), "{first}");
     assert_eq!(first, second);
     assert_eq!(exam_requests(&app), 1);
 }
@@ -814,8 +848,8 @@ fn list_fetches_again_once_stored_exams_are_an_hour_old() {
     app.ok_at(IN_WINTER, &["list"]);
     app.tiss_now_answers(vec![exams("104299", 200, OTHER_EXAM)]);
     let output = app.ok_at(AFTER_THE_HOUR, &["list"]);
-    assert!(output.contains("New exam"), "{output}");
-    assert!(!output.contains("Old exam"), "{output}");
+    assert!(output.contains("2099-04-05 14:00"), "{output}");
+    assert!(!output.contains("2099-03-05 14:00"), "{output}");
     assert_eq!(exam_requests(&app), 2);
 }
 
@@ -825,8 +859,8 @@ fn list_refresh_fetches_even_when_stored_exams_are_fresh() {
     app.ok_at(IN_WINTER, &["list"]);
     app.tiss_now_answers(vec![exams("104299", 200, OTHER_EXAM)]);
     let output = app.ok_at(IN_WINTER, &["list", "--refresh"]);
-    assert!(output.contains("New exam"), "{output}");
-    assert!(!output.contains("Old exam"), "{output}");
+    assert!(output.contains("2099-04-05 14:00"), "{output}");
+    assert!(!output.contains("2099-03-05 14:00"), "{output}");
 }
 
 #[test]
@@ -847,7 +881,7 @@ fn a_failed_exam_fetch_is_not_stored() {
     app.tiss_now_answers(vec![exams("104299", 404, NO_COURSE)]);
     app.tiss(&["list"]);
     app.tiss_now_answers(vec![exams("104299", 200, ONE_EXAM)]);
-    assert!(app.ok(&["list"]).contains("Old exam"));
+    assert!(app.ok(&["list"]).contains("2099-03-05 14:00"));
 }
 
 #[test]
@@ -866,7 +900,7 @@ fn removing_a_course_forgets_its_exams() {
     app.ok_at(IN_WINTER, &["remove", "104299"]);
     app.ok_at(IN_WINTER, &["add", "104299"]);
     app.tiss_now_answers(vec![exams("104299", 200, OTHER_EXAM)]);
-    assert!(app.ok_at(IN_WINTER, &["list"]).contains("New exam"));
+    assert!(app.ok_at(IN_WINTER, &["list"]).contains("2099-04-05 14:00"));
 }
 
 #[test]
@@ -911,7 +945,7 @@ fn a_course_no_longer_offered_can_be_tracked_by_number_and_shows_its_exams() {
     let output = app.ok_at(IN_WINTER, &["add", "230.054"]);
     assert_eq!(output, "now tracking 230.054 VO Umgebungslärm\n");
     assert_eq!(app.ok(&["courses"]), "230.054 VO Umgebungslärm\n");
-    assert!(app.ok_at(IN_WINTER, &["list"]).contains("Later exam"));
+    assert!(app.ok_at(IN_WINTER, &["list"]).contains("2099-03-05 14:00"));
 }
 
 #[test]

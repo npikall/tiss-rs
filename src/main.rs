@@ -16,7 +16,8 @@ use clap::builder::styling::{AnsiColor, Styles};
 use clap::{Parser, Subcommand};
 
 use domain::{
-    Course, CourseNumber, CourseQuery, Exam, Resolution, Semester, render_exams, resolve, upcoming,
+    Course, CourseNumber, CourseQuery, Exam, HEADING, Resolution, Semester, render_exams, resolve,
+    upcoming,
 };
 use store::Store;
 use tiss::Tiss;
@@ -25,8 +26,8 @@ const DEFAULT_API_URL: &str = "https://tiss.tuwien.ac.at/api";
 
 /// The help colors of the jj CLI.
 const HELP_STYLES: Styles = Styles::styled()
-    .header(AnsiColor::Yellow.on_default().bold())
-    .usage(AnsiColor::Yellow.on_default().bold())
+    .header(HEADING)
+    .usage(HEADING)
     .literal(AnsiColor::Green.on_default().bold())
     .placeholder(AnsiColor::Green.on_default());
 
@@ -92,6 +93,11 @@ fn terminal_width() -> Option<usize> {
     }
     let (columns, _) = crossterm::terminal::size().ok()?;
     (columns > 0).then_some(columns.into())
+}
+
+/// Only a terminal shows colors. See <https://no-color.org>: an empty `NO_COLOR` does not count.
+fn wants_color() -> bool {
+    io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
 }
 
 /// `TISS_NOW` overrides the clock, because what is stored depends on when it was stored.
@@ -205,7 +211,10 @@ impl App {
         if rows.is_empty() {
             println!("no upcoming exams");
         } else {
-            print!("{}", render_exams(&rows, self.now, terminal_width()));
+            print!(
+                "{}",
+                render_exams(&rows, self.now, terminal_width(), wants_color())
+            );
         }
         Ok(outcome)
     }
