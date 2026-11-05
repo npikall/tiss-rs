@@ -6,6 +6,15 @@ Not affiliated with TU Wien.
 
 ## Install
 
+With [Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html), straight from
+the repository:
+
+```bash
+cargo install --locked --git https://github.com/npikall/tiss-rs
+```
+
+Or from a local checkout:
+
 ```bash
 cargo install --path .
 ```
