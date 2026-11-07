@@ -83,5 +83,3 @@ overrides it), which keeps requests to TISS down:
   old.
 
 `tiss track --refresh`, `tiss list --refresh` and `tiss plan --refresh` ask TISS regardless.
-
-An existing `tracked.json` is imported on the first run and renamed to `tracked.json.imported`.

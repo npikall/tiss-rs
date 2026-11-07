@@ -802,22 +802,6 @@ fn remove_ambiguous_name_removes_nothing() {
 }
 
 #[test]
-fn corrupt_store_is_reported_and_left_untouched() {
-    let app = App::new(vec![search("104299", 0, search_page(1, &[MATHE]))]);
-    let store = app.data.path().join("tracked.json");
-    std::fs::write(&store, "not json").unwrap();
-    assert!(app.err(&["add", "104299"]).contains("tracked.json"));
-    assert_eq!(std::fs::read_to_string(store).unwrap(), "not json");
-}
-
-#[test]
-fn unreadable_store_is_an_error_not_an_empty_list() {
-    let app = App::new(vec![]);
-    std::fs::create_dir(app.data.path().join("tracked.json")).unwrap();
-    assert!(app.err(&["courses"]).contains("tracked.json"));
-}
-
-#[test]
 fn everything_is_stored_in_one_database_file() {
     let app = App::new(vec![search("104299", 0, search_page(1, &[MATHE]))]);
     app.ok(&["add", "104299"]);
@@ -836,20 +820,6 @@ fn corrupt_database_is_reported_and_left_untouched() {
     std::fs::write(&database, &garbage).unwrap();
     assert!(app.err(&["courses"]).contains("tiss.db"));
     assert_eq!(std::fs::read_to_string(database).unwrap(), garbage);
-}
-
-const TRACKED_JSON: &str = r#"{"courses":{"104299":"VO Mathematik 2 für MB"}}"#;
-
-#[test]
-fn courses_tracked_in_the_old_json_file_are_imported_once() {
-    let app = App::new(vec![]);
-    let old = app.data.path().join("tracked.json");
-    std::fs::write(&old, TRACKED_JSON).unwrap();
-    assert_eq!(app.ok(&["courses"]), "104.299 VO Mathematik 2 für MB\n");
-    assert!(!old.exists());
-    assert!(app.data.path().join("tracked.json.imported").exists());
-    app.ok(&["remove", "104299"]);
-    assert_eq!(app.ok(&["courses"]), "");
 }
 
 const IN_WINTER: &str = "2026-11-04T12:00:00+01:00";

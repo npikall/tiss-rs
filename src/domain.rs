@@ -6,11 +6,9 @@ use std::str::FromStr;
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Datelike, FixedOffset, TimeDelta};
 use clap::builder::styling::{AnsiColor, Style};
-use serde::Deserialize;
 
 /// TISS course number in canonical form: three digits, then three alphanumerics.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
-#[serde(try_from = "String")]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CourseNumber(String);
 
 impl CourseNumber {
@@ -34,14 +32,6 @@ impl FromStr for CourseNumber {
             && bytes[3..].iter().all(u8::is_ascii_alphanumeric);
         ensure!(valid, "invalid course number {s:?}, expected e.g. 104.299");
         Ok(Self(compact.to_ascii_uppercase()))
-    }
-}
-
-impl TryFrom<String> for CourseNumber {
-    type Error = anyhow::Error;
-
-    fn try_from(s: String) -> Result<Self> {
-        s.parse()
     }
 }
 

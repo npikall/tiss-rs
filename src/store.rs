@@ -1,14 +1,12 @@
 //! Everything tiss remembers, in one SQLite database.
 //! Each change runs in one transaction, so a crash leaves the old or the new state.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::io::ErrorKind;
+use std::collections::BTreeSet;
 use std::{fs, path::Path};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, FixedOffset};
 use rusqlite::{Connection, OptionalExtension, Params, params};
-use serde::Deserialize;
 
 use crate::domain::{
     Course, CourseNumber, CourseQuery, Exam, PlannedExam, Semester, exams_are_fresh,
@@ -70,8 +68,6 @@ CREATE TABLE IF NOT EXISTS planned_exam (
 ";
 
 const DATABASE_FILE: &str = "tiss.db";
-const OLD_TRACKED_FILE: &str = "tracked.json";
-const IMPORTED_TRACKED_FILE: &str = "tracked.json.imported";
 
 pub struct Store {
     db: Connection,
@@ -91,30 +87,7 @@ impl Store {
                 .with_context(context)?;
         }
         db.execute_batch(SCHEMA).with_context(context)?;
-        let mut store = Self { db };
-        store.import_old_tracked(directory)?;
-        Ok(store)
-    }
-
-    /// Running it again after a crash before the rename imports the same courses once more.
-    fn import_old_tracked(&mut self, directory: &Path) -> Result<()> {
-        let path = directory.join(OLD_TRACKED_FILE);
-        let context = || format!("cannot read {}", path.display());
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error).with_context(context),
-        };
-        let old: OldTracked = serde_json::from_str(&text).with_context(context)?;
-        let transaction = self.db.transaction()?;
-        for (number, name) in &old.courses {
-            transaction.execute(
-                "INSERT OR IGNORE INTO tracked_course (number, name) VALUES (?1, ?2)",
-                params![number.compact(), name],
-            )?;
-        }
-        transaction.commit()?;
-        fs::rename(&path, directory.join(IMPORTED_TRACKED_FILE)).with_context(context)
+        Ok(Self { db })
     }
 
     pub fn tracked_courses(&self) -> Result<Vec<Course>> {
@@ -306,9 +279,4 @@ impl Store {
 /// TISS searches ignore case, so spellings that differ only in case share one answer.
 fn search_term(query: &CourseQuery) -> String {
     query.to_string().to_lowercase()
-}
-
-#[derive(Deserialize)]
-struct OldTracked {
-    courses: BTreeMap<CourseNumber, String>,
 }
