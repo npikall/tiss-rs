@@ -123,9 +123,9 @@ impl Picker {
             Action::Down => self.move_down(1),
             Action::PageUp => self.move_up(self.page),
             Action::PageDown => self.move_down(self.page),
-            Action::Toggle => self.checked[self.cursor] ^= true,
+            Action::Toggle => self.toggle(),
             Action::ToggleAndAdvance => {
-                self.checked[self.cursor] ^= true;
+                self.toggle();
                 self.move_down(1);
             }
             Action::Invert => self.checked.iter_mut().for_each(|c| *c ^= true),
@@ -134,9 +134,9 @@ impl Picker {
                 self.checked.fill(!all);
             }
             Action::Confirm => {
-                let positions = 0..self.checked.len();
+                let checked = self.checked.iter().enumerate();
                 return Some(Answer::Checked(
-                    positions.filter(|&i| self.checked[i]).collect(),
+                    checked.filter_map(|(i, &c)| c.then_some(i)).collect(),
                 ));
             }
             Action::Quit => return Some(Answer::Quit),
@@ -144,12 +144,19 @@ impl Picker {
         None
     }
 
+    fn toggle(&mut self) {
+        if let Some(checked) = self.checked.get_mut(self.cursor) {
+            *checked ^= true;
+        }
+    }
+
     fn move_up(&mut self, by: usize) {
         self.cursor = self.cursor.saturating_sub(by);
     }
 
     fn move_down(&mut self, by: usize) {
-        self.cursor = (self.cursor + by).min(self.labels.len() - 1);
+        let last = self.labels.len().saturating_sub(1);
+        self.cursor = self.cursor.saturating_add(by).min(last);
     }
 
     /// Scrolls just far enough to keep the cursor visible.
@@ -158,7 +165,7 @@ impl Picker {
         self.top = self
             .top
             .min(self.cursor)
-            .max((self.cursor + 1).saturating_sub(self.page));
+            .max(self.cursor.saturating_add(1).saturating_sub(self.page));
         let selected = self.checked.iter().filter(|c| **c).count();
         let header = format!(
             "{}: {selected} of {} selected",
@@ -166,10 +173,11 @@ impl Picker {
             self.labels.len()
         );
         let mut rows = vec![Row::new(&header, width, true)];
-        for i in (self.top..self.labels.len()).take(self.page) {
-            rows.push(self.label_row(i, width));
+        let labels = self.labels.iter().zip(&self.checked).enumerate();
+        for (i, (label, &checked)) in labels.skip(self.top).take(self.page) {
+            rows.push(self.label_row(i, label, checked, width));
         }
-        while rows.len() + 1 < height {
+        while rows.len().saturating_add(1) < height {
             rows.push(Row::new("", width, false));
         }
         rows.push(Row::new(KEYS, width, true));
@@ -177,11 +185,11 @@ impl Picker {
         rows
     }
 
-    fn label_row(&self, i: usize, width: usize) -> Row {
+    fn label_row(&self, i: usize, label: &str, checked: bool, width: usize) -> Row {
         let focused = i == self.cursor;
         let (left, right) = if focused { ('(', ')') } else { ('[', ']') };
-        let mark = if self.checked[i] { '●' } else { ' ' };
-        let text = format!("{left}{mark}{right} {}", self.labels[i]);
+        let mark = if checked { '●' } else { ' ' };
+        let text = format!("{left}{mark}{right} {label}");
         Row::new(&text, width, focused)
     }
 }

@@ -27,3 +27,15 @@ rexpect = "0.7.1"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+# Step 1: no explicit panics. Tests are exempt via clippy.toml.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"
+# Step 2: no panicking indexing or slicing, of slices or of strings.
+indexing_slicing = "deny"
+string_slice = "deny"
+# Step 3: no overflow panics, which debug builds and chrono operators raise.
+arithmetic_side_effects = "deny"

@@ -22,14 +22,17 @@ impl FromStr for CourseNumber {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        let compact = match s.as_bytes().get(3) {
-            Some(b'.') => format!("{}{}", &s[..3], &s[4..]),
-            _ => s.to_owned(),
+        let dotted = s
+            .split_at_checked(3)
+            .and_then(|(institute, rest)| Some((institute, rest.strip_prefix('.')?)));
+        let compact = match dotted {
+            Some((institute, course)) => format!("{institute}{course}"),
+            None => s.to_owned(),
         };
         let bytes = compact.as_bytes();
         let valid = bytes.len() == 6
-            && bytes[..3].iter().all(u8::is_ascii_digit)
-            && bytes[3..].iter().all(u8::is_ascii_alphanumeric);
+            && bytes.iter().take(3).all(u8::is_ascii_digit)
+            && bytes.iter().skip(3).all(u8::is_ascii_alphanumeric);
         ensure!(valid, "invalid course number {s:?}, expected e.g. 104.299");
         Ok(Self(compact.to_ascii_uppercase()))
     }
@@ -37,7 +40,10 @@ impl FromStr for CourseNumber {
 
 impl fmt::Display for CourseNumber {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{}", &self.0[..3], &self.0[3..])
+        match self.0.split_at_checked(3) {
+            Some((institute, course)) => write!(f, "{institute}.{course}"),
+            None => f.write_str(&self.0),
+        }
     }
 }
 
@@ -145,7 +151,7 @@ pub fn exam_label(course: &Course, exam: &Exam) -> String {
 const EXAMS_MAX_AGE: TimeDelta = TimeDelta::hours(1);
 
 pub fn exams_are_fresh(fetched_at: DateTime<FixedOffset>, now: DateTime<FixedOffset>) -> bool {
-    now - fetched_at < EXAMS_MAX_AGE
+    now.signed_duration_since(fetched_at) < EXAMS_MAX_AGE
 }
 
 /// A TU Wien semester: summer runs March to September, winter October to February.
@@ -158,7 +164,7 @@ pub enum Semester {
 impl Semester {
     pub fn containing(moment: DateTime<FixedOffset>) -> Self {
         match moment.month() {
-            1 | 2 => Self::Winter(moment.year() - 1),
+            1 | 2 => Self::Winter(moment.year().saturating_sub(1)),
             3..=9 => Self::Summer(moment.year()),
             _ => Self::Winter(moment.year()),
         }
@@ -166,7 +172,7 @@ impl Semester {
 
     pub fn previous(self) -> Self {
         match self {
-            Self::Summer(year) => Self::Winter(year - 1),
+            Self::Summer(year) => Self::Winter(year.saturating_sub(1)),
             Self::Winter(year) => Self::Summer(year),
         }
     }
@@ -240,13 +246,17 @@ pub fn render_exams(
         .collect();
     let width = |column: usize| {
         rows.iter()
-            .map(|row| row[column].text.chars().count())
+            .filter_map(|row| row.get(column))
+            .map(|cell| cell.text.chars().count())
             .max()
             .unwrap_or(0)
     };
     let (date, deadline) = (width(0), width(1));
     let course = terminal_width.map_or(width(2), |total| {
-        let room = total.saturating_sub(date + deadline + COLUMN_GAPS);
+        let room = total
+            .saturating_sub(date)
+            .saturating_sub(deadline)
+            .saturating_sub(COLUMN_GAPS);
         width(2).min(room.max(COURSE_COLUMN_MIN))
     });
     let padded = |cell: &Cell, width: usize| {
@@ -282,7 +292,7 @@ fn capped(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.into();
     }
-    let kept: String = text.chars().take(max - 1).collect();
+    let kept: String = text.chars().take(max.saturating_sub(1)).collect();
     format!("{kept}…")
 }
 
@@ -307,7 +317,8 @@ fn exam_gaps(exams: &[(Course, Exam)], now: DateTime<FixedOffset>) -> Vec<Option
             let begins = exam.begins?;
             let day_before = before.with_timezone(begins.offset()).date_naive();
             before = begins;
-            Some(format_gap((begins.date_naive() - day_before).num_days()))
+            let gap = begins.date_naive().signed_duration_since(day_before);
+            Some(format_gap(gap.num_days()))
         })
         .collect()
 }

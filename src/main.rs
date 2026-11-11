@@ -369,7 +369,10 @@ impl App {
         else {
             return Ok(planned);
         };
-        let chosen: Vec<PlannedExam> = positions.iter().map(|&i| offered[i].clone()).collect();
+        let chosen: Vec<PlannedExam> = positions
+            .iter()
+            .filter_map(|&i| offered.get(i).cloned())
+            .collect();
         self.store.save_plan(&offered, &chosen)?;
         self.store.planned_exams()
     }
@@ -434,7 +437,10 @@ fn select(title: &str, candidates: &[Course]) -> Result<Vec<Course>> {
     let labels = candidates.iter().map(Course::to_string).collect();
     let unchecked = vec![false; candidates.len()];
     Ok(match picker::ask(title, labels, unchecked)? {
-        Answer::Checked(positions) => positions.iter().map(|&i| candidates[i].clone()).collect(),
+        Answer::Checked(positions) => positions
+            .iter()
+            .filter_map(|&i| candidates.get(i).cloned())
+            .collect(),
         Answer::Quit => Vec::new(),
     })
 }

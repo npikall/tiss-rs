@@ -47,7 +47,7 @@ impl Tiss {
                     page.total_results
                 );
             }
-            offset += page.results.len();
+            offset = offset.saturating_add(page.results.len());
             for result in &page.results {
                 let course = parse_course_title(&result.title)?;
                 found.entry(course.number).or_insert(course.name);

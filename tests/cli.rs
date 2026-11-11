@@ -1,5 +1,8 @@
 //! Drives the real binary against a fake TISS server and a temporary data directory.
 
+// Test helpers sit outside `#[test]` functions, where clippy.toml's test exemptions do not reach.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
