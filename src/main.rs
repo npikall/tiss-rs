@@ -7,6 +7,7 @@ mod tiss;
 
 use std::collections::BTreeSet;
 use std::env;
+use std::fmt::Write;
 use std::io::{self, IsTerminal};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -172,9 +173,9 @@ fn environment_help() -> String {
     ];
     let mut help = format!("{HEADING}Environment variables:{HEADING:#}\n");
     for (name, description) in variables {
-        help += &format!("  {LITERAL}{name}{LITERAL:#}\n");
+        let _ = writeln!(help, "  {LITERAL}{name}{LITERAL:#}");
         for line in description.lines() {
-            help += &format!("          {line}\n");
+            let _ = writeln!(help, "          {line}");
         }
         help += "\n";
     }
@@ -199,7 +200,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Untrack { course } => app.untrack(course.as_ref()),
         Command::Courses => {
             let courses = app.store.tracked_courses()?;
-            courses.iter().for_each(|c| println!("{c}"));
+            for c in &courses {
+                println!("{c}");
+            }
             Ok(ExitCode::SUCCESS)
         }
         Command::List { refresh, limit } => app.list(refresh, limit),

@@ -1,6 +1,6 @@
 //! Domain types and pure rules. See CONTEXT.md for the glossary.
 
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::str::FromStr;
 
 use anyhow::{Context, Result, ensure};
@@ -253,19 +253,20 @@ pub fn render_exams(
         let text = format!("{:<width$}", cell.text);
         painted(&text, cell.style, color)
     };
-    rows.iter()
-        .map(|[a, b, c]| {
-            let text = capped(&c.text, course);
-            // Only the course number stands out, the name is what is left of it.
-            let (first_word, rest) = text.split_at(text.find(' ').unwrap_or(text.len()));
-            let first_word = painted(first_word, c.style, color);
-            format!(
-                "{}  {}  {first_word}{rest}\n",
-                padded(a, date),
-                padded(b, deadline)
-            )
-        })
-        .collect()
+    let mut out = String::new();
+    for [a, b, c] in &rows {
+        let text = capped(&c.text, course);
+        // Only the course number stands out, the name is what is left of it.
+        let (first_word, rest) = text.split_at(text.find(' ').unwrap_or(text.len()));
+        let first_word = painted(first_word, c.style, color);
+        let _ = writeln!(
+            out,
+            "{}  {}  {first_word}{rest}",
+            padded(a, date),
+            padded(b, deadline)
+        );
+    }
+    out
 }
 
 fn painted(text: &str, style: Style, color: bool) -> String {
