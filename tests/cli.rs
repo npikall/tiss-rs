@@ -259,7 +259,7 @@ fn in_terminal(app: &App, args: &[&str], keys: &str) -> String {
         .exp_eof()
         .unwrap()
         .chars()
-        .map(|c| c as u8)
+        .map(|c| u8::try_from(c).unwrap())
         .collect();
     String::from_utf8(bytes).unwrap()
 }
@@ -311,7 +311,7 @@ fn printed_in_terminal(command: Command) -> String {
         .exp_eof()
         .unwrap()
         .chars()
-        .map(|c| c as u8)
+        .map(|c| u8::try_from(c).unwrap())
         .collect();
     String::from_utf8(bytes).unwrap()
 }

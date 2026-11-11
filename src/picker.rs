@@ -150,7 +150,7 @@ impl Picker {
         }
     }
 
-    fn move_up(&mut self, by: usize) {
+    const fn move_up(&mut self, by: usize) {
         self.cursor = self.cursor.saturating_sub(by);
     }
 

@@ -147,7 +147,7 @@ pub fn planned_exam(course: &Course, exam: &Exam) -> PlannedExam {
 /// One picker line. The title tells exams at the same moment apart, so it comes before the course
 /// name, which is cut first when the line is too long.
 pub fn exam_label(course: &Course, exam: &Exam) -> String {
-    let moment = exam.begins.map_or("TBA".into(), format_moment);
+    let moment = exam.begins.map_or_else(|| "TBA".into(), format_moment);
     let Course { number, name } = course;
     format!("{moment:<MOMENT_WIDTH$}  {number}  {}  {name}", exam.title)
 }
@@ -175,7 +175,7 @@ impl Semester {
         }
     }
 
-    pub fn previous(self) -> Self {
+    pub const fn previous(self) -> Self {
         match self {
             Self::Summer(year) => Self::Winter(year.saturating_sub(1)),
             Self::Winter(year) => Self::Summer(year),
@@ -254,13 +254,16 @@ pub fn render_exams(
             .unwrap_or(0)
     };
     let (date, deadline) = (width(0), width(1));
-    let course = terminal_width.map_or(width(2), |total| {
-        let room = total
-            .saturating_sub(date)
-            .saturating_sub(deadline)
-            .saturating_sub(COLUMN_GAPS);
-        width(2).min(room.max(COURSE_COLUMN_MIN))
-    });
+    let course = terminal_width.map_or_else(
+        || width(2),
+        |total| {
+            let room = total
+                .saturating_sub(date)
+                .saturating_sub(deadline)
+                .saturating_sub(COLUMN_GAPS);
+            width(2).min(room.max(COURSE_COLUMN_MIN))
+        },
+    );
     let padded = |cell: &Cell, width: usize| {
         let text = format!("{:<width$}", cell.text);
         look.paint(&text, cell.style)
@@ -304,7 +307,7 @@ fn render_branches(
         .collect();
     let dates: Vec<String> = exams
         .iter()
-        .map(|(_, exam)| exam.begins.map_or("TBA".into(), dated_moment))
+        .map(|(_, exam)| exam.begins.map_or_else(|| "TBA".into(), dated_moment))
         .collect();
     let widest = |texts: &[String]| texts.iter().map(|t| t.chars().count()).max().unwrap_or(0);
     let (date_width, gap_width) = (widest(&dates), widest(&gaps));
@@ -314,7 +317,7 @@ fn render_branches(
     let mut out = format!("{} {}\n", faint("╭┄"), look.paint(title, HEADING));
     for (((course, exam), date), gap) in exams.iter().zip(&dates).zip(&gaps) {
         let course = course.to_string();
-        let course = room.map_or(course.clone(), |room| capped(&course, room));
+        let course = room.map_or_else(|| course.clone(), |room| capped(&course, room));
         let _ = writeln!(
             out,
             "{} {}",
@@ -414,10 +417,8 @@ fn format_moment(moment: DateTime<FixedOffset>) -> String {
 }
 
 fn date_cell(begins: Option<DateTime<FixedOffset>>) -> Cell {
-    match begins {
-        None => Cell::new("TBA", EXAM_DATE),
-        Some(begins) => Cell::new(format_moment(begins), EXAM_DATE),
-    }
+    let text = begins.map_or_else(|| "TBA".into(), format_moment);
+    Cell::new(text, EXAM_DATE)
 }
 
 /// How long after the exam before each exam is, or after `now` for the first.
@@ -449,7 +450,7 @@ fn deadline_cell(
     now: DateTime<FixedOffset>,
     gap: Option<String>,
 ) -> Cell {
-    let moment = end.map_or("-".into(), format_moment);
+    let moment = end.map_or_else(|| "-".into(), format_moment);
     let text = match gap {
         Some(gap) => format!("{moment:<MOMENT_WIDTH$} {gap}"),
         None => moment,
@@ -623,7 +624,7 @@ mod tests {
             vec![
                 (c.clone(), exam("undated", None, None)),
                 (c.clone(), exam("later", Some(LATER), None)),
-                (c.clone(), exam("sooner", Some(SOON), None)),
+                (c, exam("sooner", Some(SOON), None)),
             ],
             at(NOW),
         );
@@ -638,7 +639,7 @@ mod tests {
                 (c.clone(), exam("past", Some(PAST), None)),
                 (c.clone(), exam("undated, closed", None, Some(PAST))),
                 (c.clone(), exam("undated, open", None, Some(SOON))),
-                (c.clone(), exam("closed, ahead", Some(SOON), Some(PAST))),
+                (c, exam("closed, ahead", Some(SOON), Some(PAST))),
             ],
             at(NOW),
         );
@@ -651,7 +652,7 @@ mod tests {
         let rows = upcoming(
             vec![
                 (c.clone(), exam("begins now", Some(NOW), None)),
-                (c.clone(), exam("undated, ends now", None, Some(NOW))),
+                (c, exam("undated, ends now", None, Some(NOW))),
             ],
             at(NOW),
         );

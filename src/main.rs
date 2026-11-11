@@ -237,10 +237,10 @@ fn terminal_width() -> Option<usize> {
 
 /// `TISS_NOW` overrides the clock, because what is stored depends on when it was stored.
 fn now() -> Result<DateTime<FixedOffset>> {
-    match env::var("TISS_NOW") {
-        Ok(now) => DateTime::parse_from_rfc3339(&now).context("invalid TISS_NOW"),
-        Err(_) => Ok(Utc::now().fixed_offset()),
-    }
+    env::var("TISS_NOW").map_or_else(
+        |_| Ok(Utc::now().fixed_offset()),
+        |now| DateTime::parse_from_rfc3339(&now).context("invalid TISS_NOW"),
+    )
 }
 
 fn data_directory() -> Result<PathBuf> {
@@ -298,14 +298,14 @@ impl App {
     }
 
     /// Without a query every tracked course is a candidate.
-    fn untrack(&mut self, query: Option<&CourseQuery>) -> Result<ExitCode> {
+    fn untrack(&self, query: Option<&CourseQuery>) -> Result<ExitCode> {
         let tracked = self.store.tracked_courses()?;
         let resolution = match query {
             Some(query) => resolve(query, tracked),
             None if tracked.is_empty() => Resolution::NotFound,
             None => Resolution::Ambiguous(tracked),
         };
-        let title = query.map_or("Choose courses to stop tracking".into(), matches_several);
+        let title = query.map_or_else(|| "Choose courses to stop tracking".into(), matches_several);
         let courses = match resolution {
             Resolution::Found(course) => vec![course],
             Resolution::NotFound => {
