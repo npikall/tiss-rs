@@ -4,6 +4,7 @@ mod domain;
 mod picker;
 mod store;
 mod tiss;
+mod ui;
 
 use std::collections::BTreeSet;
 use std::env;
@@ -15,22 +16,20 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow, ensure};
 use chrono::{DateTime, FixedOffset, Utc};
-use clap::builder::styling::{AnsiColor, Style, Styles};
+use clap::builder::styling::{AnsiColor, Styles};
 use clap::{Parser, Subcommand};
 
 use domain::{
-    Course, CourseNumber, CourseQuery, Exam, HEADING, PlannedExam, Resolution, Semester,
-    exam_label, planned_exam, render_exams, resolve, upcoming,
+    Course, CourseNumber, CourseQuery, Exam, PlannedExam, Resolution, Semester, exam_label,
+    planned_exam, render_courses, render_exams, resolve, upcoming,
 };
 use picker::Answer;
 use store::Store;
 use tiss::Tiss;
+use ui::{Bullet, HEADING, LITERAL, Look, say};
 
 const DEFAULT_API_URL: &str = "https://tiss.tuwien.ac.at/api";
 const NOTHING_TRACKED: &str = "no courses tracked yet, start with: tiss track <course>";
-
-/// The color of what a user types, in the help of the jj CLI.
-const LITERAL: Style = AnsiColor::Green.on_default().bold();
 
 /// The help colors of the jj CLI.
 const HELP_STYLES: Styles = Styles::styled()
@@ -49,6 +48,12 @@ const HELP_STYLES: Styles = Styles::styled()
 struct Cli {
     #[command(subcommand)]
     command: Command,
+    /// Print without graphs and bullets: exams as a table with full dates, messages bare
+    ///
+    /// This is what piped output always looks like. In a terminal the table keeps its colors
+    /// and still cuts long course names to fit.
+    #[arg(long, global = true)]
+    simple: bool,
 }
 
 #[derive(Subcommand)]
@@ -184,8 +189,12 @@ fn environment_help() -> String {
 }
 
 fn main() -> ExitCode {
-    run(Cli::parse()).unwrap_or_else(|error| {
-        eprintln!("error: {error:#}");
+    let cli = Cli::parse();
+    if cli.simple {
+        ui::be_simple();
+    }
+    run(cli).unwrap_or_else(|error| {
+        ui::complain(&format!("{error:#}"));
         ExitCode::FAILURE
     })
 }
@@ -200,8 +209,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
         Command::Untrack { course } => app.untrack(course.as_ref()),
         Command::Courses => {
             let courses = app.store.tracked_courses()?;
-            for c in &courses {
-                println!("{c}");
+            let look = Look::of(&io::stdout());
+            if courses.is_empty() && look.graph {
+                say(Bullet::Note, NOTHING_TRACKED);
+            } else {
+                print!("{}", render_courses(&courses, look));
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -221,11 +233,6 @@ fn terminal_width() -> Option<usize> {
     }
     let (columns, _) = crossterm::terminal::size().ok()?;
     (columns > 0).then_some(columns.into())
-}
-
-/// Only a terminal shows colors. See <https://no-color.org>: an empty `NO_COLOR` does not count.
-fn wants_color() -> bool {
-    io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
 }
 
 /// `TISS_NOW` overrides the clock, because what is stored depends on when it was stored.
@@ -259,13 +266,13 @@ impl App {
             Resolution::Ambiguous(candidates) => select(&matches_several(query), &candidates)?,
         };
         if courses.is_empty() {
-            println!("nothing tracked");
+            say(Bullet::Note, "nothing tracked");
         }
         for course in courses {
             if self.store.track(&course)? {
-                println!("now tracking {course}");
+                say(Bullet::Done, &format!("now tracking {course}"));
             } else {
-                println!("already tracking {course}");
+                say(Bullet::Note, &format!("already tracking {course}"));
             }
         }
         Ok(ExitCode::SUCCESS)
@@ -302,17 +309,17 @@ impl App {
         let courses = match resolution {
             Resolution::Found(course) => vec![course],
             Resolution::NotFound => {
-                println!("not tracked, nothing to remove");
+                say(Bullet::Note, "not tracked, nothing to remove");
                 return Ok(ExitCode::SUCCESS);
             }
             Resolution::Ambiguous(candidates) => select(&title, &candidates)?,
         };
         if courses.is_empty() {
-            println!("nothing removed");
+            say(Bullet::Note, "nothing removed");
         }
         for course in courses {
             self.store.untrack(&course.number)?;
-            println!("removed {course}");
+            say(Bullet::Removed, &format!("removed {course}"));
         }
         Ok(ExitCode::SUCCESS)
     }
@@ -320,18 +327,18 @@ impl App {
     fn list(&mut self, refresh: bool, limit: Option<NonZeroUsize>) -> Result<ExitCode> {
         let courses = self.store.tracked_courses()?;
         if courses.is_empty() {
-            println!("{NOTHING_TRACKED}");
+            say(Bullet::Note, NOTHING_TRACKED);
             return Ok(ExitCode::SUCCESS);
         }
         let (rows, outcome) = self.upcoming_exams(courses, refresh);
-        self.show_exams(rows, limit, "no upcoming exams");
+        self.show_exams("Upcoming exams", rows, limit, "no upcoming exams");
         Ok(outcome)
     }
 
     fn plan(&mut self, edit: bool, refresh: bool, limit: Option<NonZeroUsize>) -> Result<ExitCode> {
         let mut courses = self.store.tracked_courses()?;
         if courses.is_empty() {
-            println!("{NOTHING_TRACKED}");
+            say(Bullet::Note, NOTHING_TRACKED);
             return Ok(ExitCode::SUCCESS);
         }
         ensure!(
@@ -348,7 +355,7 @@ impl App {
         }
         rows.retain(|(course, exam)| planned.contains(&planned_exam(course, exam)));
         let nothing = "no upcoming exams planned, choose them with: tiss plan --edit";
-        self.show_exams(rows, limit, nothing);
+        self.show_exams("Planned exams", rows, limit, nothing);
         Ok(outcome)
     }
 
@@ -389,7 +396,7 @@ impl App {
             match self.exams_of(&course.number, refresh) {
                 Ok(found) => exams.extend(found.into_iter().map(|e| (course.clone(), e))),
                 Err(error) => {
-                    eprintln!("error: {course}: {error:#}");
+                    ui::complain(&format!("{course}: {error:#}"));
                     outcome = ExitCode::FAILURE;
                 }
             }
@@ -399,17 +406,24 @@ impl App {
 
     fn show_exams(
         &self,
+        title: &str,
         mut rows: Vec<(Course, Exam)>,
         limit: Option<NonZeroUsize>,
         nothing: &str,
     ) {
         rows.truncate(limit.map_or(usize::MAX, NonZeroUsize::get));
         if rows.is_empty() {
-            println!("{nothing}");
+            say(Bullet::Note, nothing);
         } else {
             print!(
                 "{}",
-                render_exams(&rows, self.now, terminal_width(), wants_color())
+                render_exams(
+                    title,
+                    &rows,
+                    self.now,
+                    terminal_width(),
+                    Look::of(&io::stdout())
+                )
             );
         }
     }

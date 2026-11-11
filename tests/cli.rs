@@ -689,10 +689,15 @@ fn list_keeps_full_names_when_piped() {
 #[cfg(unix)]
 #[test]
 fn list_fits_rows_to_the_terminal_width() {
-    let app = tracked_with_exams(ONE_EXAM);
+    let long = "104.299 VO Mathematik 2 für Maschinenbau, Wirtschaftsingenieurwesen und VT, 2027S";
+    let app = App::new(vec![
+        search("104299", 0, search_page(1, &[long])),
+        exams("104299", 200, ONE_EXAM),
+    ]);
+    app.ok(&["add", "104299"]);
     let printed = list_in_terminal_of_width(&app, 60);
     assert!(printed.contains('…'), "{printed}");
-    assert!(!printed.contains(COURSE_NAME), "{printed}");
+    assert!(!printed.contains("Wirtschaftsingenieurwesen"), "{printed}");
     assert!(
         printed
             .lines()
@@ -715,7 +720,7 @@ fn list_is_colored_in_a_terminal() {
     let app = tracked_with_exams(ONE_EXAM);
     let printed = list_in_terminal(&app, 100, None);
     assert!(
-        printed.contains("\x1b[1m\x1b[34m104.299\x1b[0m"),
+        printed.contains("\x1b[1m\x1b[35m104.299\x1b[0m"),
         "{printed:?}"
     );
 }
@@ -734,6 +739,36 @@ fn list_respects_no_color() {
     let printed = list_in_terminal(&app, 100, Some("1"));
     assert!(!printed.contains('\x1b'), "{printed:?}");
     assert!(printed.contains("104.299"), "{printed}");
+}
+
+#[cfg(unix)]
+#[test]
+fn simple_turns_graphs_and_bullets_off_in_a_terminal_but_keeps_colors() {
+    let app = tracked_with_exams(ONE_EXAM);
+    let run = |arguments: &str| {
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                &format!("exec \"$0\" {arguments}"),
+                env!("CARGO_BIN_EXE_tiss"),
+            ])
+            .env("TISS_DATA_DIR", app.data.path())
+            .env("TISS_API_URL", &app.base)
+            .env_remove("NO_COLOR");
+        printed_in_terminal(command)
+    };
+    let list = run("list --simple");
+    assert!(list.contains("Exam date"), "{list}");
+    assert!(list.contains("2099-03-05 14:00"), "{list}");
+    assert!(list.contains("\x1b[1m\x1b[35m104.299\x1b[0m"), "{list:?}");
+    assert!(!list.contains('┊') && !list.contains('•'), "{list}");
+    assert_eq!(run("--simple courses").trim_end(), MATHE_VO.trim_end());
+    let removed = run("--simple untrack 104299");
+    assert_eq!(
+        removed.trim_end(),
+        format!("removed {}", MATHE_VO.trim_end())
+    );
 }
 
 #[test]
@@ -760,7 +795,7 @@ fn list_treats_no_exam_dates_as_empty_not_failure() {
 fn list_with_nothing_tracked_says_how_to_start() {
     let app = App::new(vec![]);
     assert!(app.ok(&["list"]).contains("tiss track"));
-    assert!(app.requests().is_empty());
+    assert_eq!(app.requests(), Vec::<String>::new());
 }
 
 #[test]
@@ -1000,7 +1035,7 @@ fn a_failed_exam_fetch_is_not_stored() {
 fn a_stored_deadline_closes_when_its_time_passes() {
     let closes_soon = r#"<tuvienna><exam id="1"><title>E</title><examinationBegin>2099-01-01T10:00:00.000+01:00</examinationBegin><applicationEnd>2026-11-04T12:30:00.000+01:00</applicationEnd></exam></tuvienna>"#;
     let app = tracked_with_exams(closes_soon);
-    let closed = "\x1b[31m2026-11-04 12:30";
+    let closed = "\x1b[31m04 Nov 12:30";
     assert!(!list_in_terminal_at(&app, IN_WINTER).contains(closed));
     assert!(list_in_terminal_at(&app, WITHIN_THE_HOUR).contains(closed));
     assert_eq!(exam_requests(&app), 1);
@@ -1189,8 +1224,8 @@ fn plan_edit_prints_the_new_plan() {
     let app = tracked_mathe_with_three_upcoming_exams();
     let printed = in_terminal(&app, &["plan", "--edit"], "j c");
     let (_, after_the_picker) = printed.rsplit_once("\u{1b}[?1049l").unwrap();
-    assert!(after_the_picker.contains("2099-03-05 14:00"), "{printed}");
-    assert!(!after_the_picker.contains("2099-01-08 14:00"), "{printed}");
+    assert!(after_the_picker.contains("05 Mar 2099 14:00"), "{printed}");
+    assert!(!after_the_picker.contains("08 Jan 2099 14:00"), "{printed}");
 }
 
 #[cfg(unix)]

@@ -264,16 +264,16 @@ mod tests {
 
     #[test]
     fn toggling_twice_unchecks_and_confirm_returns_checked_in_order() {
-        let mut p = picker(3);
         use Action::*;
+        let mut p = picker(3);
         press(&mut p, &[Toggle, Down, Toggle, Toggle, Down, Toggle]);
         assert_eq!(confirmed(p), [0, 2]);
     }
 
     #[test]
     fn enter_checks_and_advances_but_stays_on_the_last() {
-        let mut p = picker(2);
         use Action::*;
+        let mut p = picker(2);
         press(&mut p, &[ToggleAndAdvance, ToggleAndAdvance]);
         assert_eq!(p.cursor, 1);
         assert_eq!(confirmed(p), [0, 1]);
@@ -281,8 +281,8 @@ mod tests {
 
     #[test]
     fn cursor_stops_at_both_ends() {
-        let mut p = picker(2);
         use Action::*;
+        let mut p = picker(2);
         press(&mut p, &[Up]);
         assert_eq!(p.cursor, 0);
         press(&mut p, &[Down, Down, Down]);
@@ -302,7 +302,7 @@ mod tests {
 
         let mut p = picker(3);
         press(&mut p, &[ToggleAll, ToggleAll]);
-        assert!(confirmed(p).is_empty());
+        assert_eq!(confirmed(p), Vec::<usize>::new());
     }
 
     #[test]
@@ -322,8 +322,8 @@ mod tests {
 
     #[test]
     fn frame_shows_jj_style_boxes_with_parentheses_on_the_cursor() {
-        let mut p = picker(3);
         use Action::*;
+        let mut p = picker(3);
         press(&mut p, &[Toggle, Down, Down, Toggle, Up]);
         assert_eq!(
             lines(&mut p, 6),
@@ -355,10 +355,10 @@ mod tests {
 
     #[test]
     fn frame_scrolls_only_as_far_as_the_cursor_needs() {
+        use Action::*;
         let mut p = picker(10);
         let visible = |p: &mut Picker| lines(p, 5)[1..4].join("|");
         assert_eq!(visible(&mut p), "( ) course 0|[ ] course 1|[ ] course 2");
-        use Action::*;
         press(&mut p, &[Down, Down, Down]);
         assert_eq!(visible(&mut p), "[ ] course 1|[ ] course 2|( ) course 3");
         press(&mut p, &[Up]);
@@ -367,9 +367,9 @@ mod tests {
 
     #[test]
     fn page_keys_move_by_what_fits_on_screen() {
+        use Action::*;
         let mut p = picker(10);
         p.frame(WIDTH, 5);
-        use Action::*;
         press(&mut p, &[PageDown]);
         assert_eq!(p.cursor, 3);
         press(&mut p, &[PageUp, PageUp]);

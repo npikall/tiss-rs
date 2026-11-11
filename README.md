@@ -34,8 +34,30 @@ tiss untrack 104.299            # stop tracking
 
 `add` still works for `track`, and `remove` and `rm` for `untrack`.
 
-In a terminal, `tiss list` colors its table, unless `NO_COLOR` is set, and cuts long course names
-with `…` so rows fit its width. Piped output stays plain and keeps them whole.
+In a terminal, `tiss list` and `tiss plan` draw each exam as a branch and cut long course names
+with `…` so they fit its width:
+
+```text
+╭┄ Upcoming exams
+┊╭┄ 104.299 VO Mathematik 2
+┊•  20 Nov 2026 14:00  9d  register by  18 Nov 10:00
+├╯
+┊╭┄ 104.299 VO Mathematik 2
+┊•  08 Jan 2027 14:00  7w  closed since 01 Nov 10:00
+├╯
+┊╭┄ 185.A91 VU Einführung in die Programmierung 1
+┊•  TBA                    no deadline
+├╯
+┴ 3 exams
+```
+
+Behind the exam date stands the exam gap. Deadlines leave out the year unless they are about a
+year or more from now. `tiss courses` draws a graph too, messages start with a `•` and errors with a
+`⨯`. Colors are on unless `NO_COLOR` is set. Piped output stays a plain table with full dates and
+whole names, with neither graph nor bullets.
+
+`--simple`, on any command, turns graphs and bullets off in a terminal too: exams are a table with
+full dates again, which keeps its colors and still cuts long names to fit.
 
 When a name matches several courses, a checkbox list asks which you mean. `tiss untrack` without
 an argument asks the same about every tracked course, and `tiss plan --edit` about every upcoming

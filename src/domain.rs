@@ -5,7 +5,12 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Datelike, FixedOffset, TimeDelta};
-use clap::builder::styling::{AnsiColor, Style};
+use clap::builder::styling::Style;
+
+use crate::ui::{
+    COURSE_NUMBER, EXAM_DATE, FAINT, GRAPH_BOTTOM, GRAPH_TOP, HEADING, Look, NODE,
+    REGISTRATION_CLOSED, REGISTRATION_OPEN,
+};
 
 /// TISS course number in canonical form: three digits, then three alphanumerics.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -205,14 +210,6 @@ const MOMENT_WIDTH: usize = "YYYY-MM-DD HH:MM".len();
 /// Exam gaps of at least this many days are shown in weeks.
 const DAYS_SHOWN_AS_DAYS: i64 = 14;
 
-/// Headings look the same in the help and in tables.
-pub const HEADING: Style = AnsiColor::Yellow.on_default().bold();
-// Columns are colored like `git lr`: hash, time, author, with refs' red for closed deadlines.
-const EXAM_DATE: Style = AnsiColor::Yellow.on_default();
-const REGISTRATION_OPEN: Style = AnsiColor::Green.on_default();
-const COURSE_NUMBER: Style = AnsiColor::Blue.on_default().bold();
-const REGISTRATION_CLOSED: Style = AnsiColor::Red.on_default();
-
 struct Cell {
     text: String,
     style: Style,
@@ -227,12 +224,17 @@ impl Cell {
 
 /// Renders exams as aligned columns, marking registration deadlines that have passed.
 /// Given a width, course text is shortened so that rows fit it.
+/// As a graph, each exam is a branch under the `title` instead, see [`render_branches`].
 pub fn render_exams(
+    title: &str,
     exams: &[(Course, Exam)],
     now: DateTime<FixedOffset>,
     terminal_width: Option<usize>,
-    color: bool,
+    look: Look,
 ) -> String {
+    if look.graph {
+        return render_branches(title, exams, now, terminal_width, look);
+    }
     let header = ["Exam date", "Register by", "Course"].map(|title| Cell::new(title, HEADING));
     let gaps = exam_gaps(exams, now);
     let rows: Vec<[Cell; 3]> = std::iter::once(header)
@@ -261,30 +263,141 @@ pub fn render_exams(
     });
     let padded = |cell: &Cell, width: usize| {
         let text = format!("{:<width$}", cell.text);
-        painted(&text, cell.style, color)
+        look.paint(&text, cell.style)
     };
     let mut out = String::new();
     for [a, b, c] in &rows {
-        let text = capped(&c.text, course);
-        // Only the course number stands out, the name is what is left of it.
-        let (first_word, rest) = text.split_at(text.find(' ').unwrap_or(text.len()));
-        let first_word = painted(first_word, c.style, color);
         let _ = writeln!(
             out,
-            "{}  {}  {first_word}{rest}",
+            "{}  {}  {}",
             padded(a, date),
-            padded(b, deadline)
+            padded(b, deadline),
+            course_text(&capped(&c.text, course), c.style, look)
         );
     }
     out
 }
 
-fn painted(text: &str, style: Style, color: bool) -> String {
-    if color {
-        format!("{style}{text}{style:#}")
-    } else {
-        text.into()
+/// Only the first word, the course number, stands out, the name is what is left of it.
+fn course_text(text: &str, style: Style, look: Look) -> String {
+    let (number, name) = text.split_at(text.find(' ').unwrap_or(text.len()));
+    format!("{}{name}", look.paint(number, style))
+}
+
+/// Characters a branch puts before the course and the dates.
+const BRANCH_GUTTER: usize = 4;
+
+/// Renders each exam as a branch off a trunk that the `title` heads, the way `but status` draws
+/// branches: the course
+/// on the line that opens the branch, then exam date, exam gap and registration deadline behind
+/// a node. Given a width, the course is shortened to fit it. The last line counts the exams.
+fn render_branches(
+    title: &str,
+    exams: &[(Course, Exam)],
+    now: DateTime<FixedOffset>,
+    terminal_width: Option<usize>,
+    look: Look,
+) -> String {
+    let gaps: Vec<String> = exam_gaps(exams, now)
+        .into_iter()
+        .map(Option::unwrap_or_default)
+        .collect();
+    let dates: Vec<String> = exams
+        .iter()
+        .map(|(_, exam)| exam.begins.map_or("TBA".into(), dated_moment))
+        .collect();
+    let widest = |texts: &[String]| texts.iter().map(|t| t.chars().count()).max().unwrap_or(0);
+    let (date_width, gap_width) = (widest(&dates), widest(&gaps));
+    let room =
+        terminal_width.map(|total| total.saturating_sub(BRANCH_GUTTER).max(COURSE_COLUMN_MIN));
+    let faint = |text: &str| look.paint(text, FAINT);
+    let mut out = format!("{} {}\n", faint("╭┄"), look.paint(title, HEADING));
+    for (((course, exam), date), gap) in exams.iter().zip(&dates).zip(&gaps) {
+        let course = course.to_string();
+        let course = room.map_or(course.clone(), |room| capped(&course, room));
+        let _ = writeln!(
+            out,
+            "{} {}",
+            faint("┊╭┄"),
+            course_text(&course, COURSE_NUMBER, look)
+        );
+        let line = format!(
+            "{}{}  {}  {}  {}",
+            faint("┊"),
+            look.paint("•", NODE),
+            look.paint(&format!("{date:<date_width$}"), EXAM_DATE),
+            faint(&format!("{gap:<gap_width$}")),
+            deadline_text(exam.registration_end, now, look)
+        );
+        let _ = writeln!(out, "{}", line.trim_end());
+        let _ = writeln!(out, "{}", faint("├╯"));
     }
+    out + &graph_bottom("┴ ", exams.len(), "exam", look)
+}
+
+/// Says in words whether one can still register, so that it also reads without colors.
+fn deadline_text(
+    end: Option<DateTime<FixedOffset>>,
+    now: DateTime<FixedOffset>,
+    look: Look,
+) -> String {
+    let Some(end) = end else {
+        return look.paint("no deadline", FAINT);
+    };
+    let (label, style) = if end < now {
+        ("closed since", REGISTRATION_CLOSED)
+    } else {
+        ("register by ", REGISTRATION_OPEN)
+    };
+    let moment = look.paint(&short_moment(end, now), style);
+    format!("{} {moment}", look.paint(label, FAINT))
+}
+
+/// Deadlines this close to now are shown without their year, which the exam date beside them
+/// tells.
+const DAYS_SHOWN_WITHOUT_YEAR: i64 = 330;
+
+/// An exam date in a graph, always with its year: `20 Nov 2026 14:00`.
+fn dated_moment(moment: DateTime<FixedOffset>) -> String {
+    moment.format("%d %b %Y %H:%M").to_string()
+}
+
+/// A deadline as short as a graph can show it: `20 Nov 14:00`, with its year far from now.
+fn short_moment(moment: DateTime<FixedOffset>, now: DateTime<FixedOffset>) -> String {
+    if moment.signed_duration_since(now).num_days().abs() < DAYS_SHOWN_WITHOUT_YEAR {
+        moment.format("%d %b %H:%M").to_string()
+    } else {
+        dated_moment(moment)
+    }
+}
+
+/// Renders courses one per line, as a graph under a heading when `look` asks for one.
+pub fn render_courses(courses: &[Course], look: Look) -> String {
+    let mut out = String::new();
+    if !look.graph {
+        for course in courses {
+            let _ = writeln!(out, "{course}");
+        }
+        return out;
+    }
+    let top = look.paint(GRAPH_TOP, FAINT);
+    let _ = writeln!(out, "{top}{}", look.paint("Tracked courses", HEADING));
+    for course in courses {
+        let node = look.paint("•", NODE);
+        let _ = writeln!(
+            out,
+            "{node}  {}",
+            course_text(&course.to_string(), COURSE_NUMBER, look)
+        );
+    }
+    out + &graph_bottom(GRAPH_BOTTOM, courses.len(), "course", look)
+}
+
+/// The line closing a graph, which says how many rows hang on it.
+fn graph_bottom(corner: &str, count: usize, noun: &str, look: Look) -> String {
+    let plural = if count == 1 { "" } else { "s" };
+    let line = format!("{corner}{count} {noun}{plural}");
+    format!("{}\n", look.paint(&line, FAINT))
 }
 
 /// Cuts `text` to at most `max` characters, ending in an ellipsis if anything was lost.
@@ -583,7 +696,128 @@ TBA               -                    185.A91 VU Longer
     }
 
     fn plain(rows: &[(Course, Exam)], width: Option<usize>) -> String {
-        render_exams(rows, at(NOW), width, false)
+        render_exams("Upcoming exams", rows, at(NOW), width, Look::PLAIN)
+    }
+
+    const COLOR: Look = Look {
+        graph: false,
+        color: true,
+    };
+    const GRAPH: Look = Look {
+        graph: true,
+        color: false,
+    };
+
+    #[test]
+    fn graph_draws_each_exam_as_a_branch_and_counts_them() {
+        let rows = vec![
+            (course("104299", "VO X"), exam("E", Some(SOON), Some(LATER))),
+            (course("185A91", "VU Y"), exam("E", None, Some(PAST))),
+            (course("185A91", "VU Y"), exam("E", None, None)),
+        ];
+        let expected = "\
+╭┄ Upcoming exams
+┊╭┄ 104.299 VO X
+┊•  01 Jul 2026 10:00  4w  register by  01 Sep 10:00
+├╯
+┊╭┄ 185.A91 VU Y
+┊•  TBA                    closed since 01 May 10:00
+├╯
+┊╭┄ 185.A91 VU Y
+┊•  TBA                    no deadline
+├╯
+┴ 3 exams
+";
+        assert_eq!(
+            render_exams("Upcoming exams", &rows, at(NOW), None, GRAPH),
+            expected
+        );
+    }
+
+    #[test]
+    fn graph_counts_a_single_exam_in_the_singular() {
+        let rendered = render_exams("Upcoming exams", &one_row("VO X"), at(NOW), None, GRAPH);
+        assert!(rendered.ends_with("┴ 1 exam\n"), "{rendered}");
+    }
+
+    #[test]
+    fn graph_cuts_the_course_to_the_width() {
+        let rendered = render_exams(
+            "Upcoming exams",
+            &one_row(LONG_COURSE),
+            at(NOW),
+            Some(24),
+            GRAPH,
+        );
+        assert_eq!(data_line(&rendered), "┊╭┄ 104.299 VO Mathemat…");
+    }
+
+    #[test]
+    fn graph_shows_the_year_of_exam_dates_always_and_of_deadlines_only_far_from_now() {
+        let far = exam("E", Some(SOON), Some("2027-06-01T10:00:00+02:00"));
+        let rendered = render_exams(
+            "Upcoming exams",
+            &[(course("104299", "VO X"), far)],
+            at(NOW),
+            None,
+            GRAPH,
+        );
+        assert!(rendered.contains("01 Jul 2026 10:00"), "{rendered}");
+        assert!(rendered.contains("by  01 Jun 2027 10:00"), "{rendered}");
+        let near = exam("E", Some(SOON), Some(PAST));
+        let rendered = render_exams(
+            "T",
+            &[(course("104299", "VO X"), near)],
+            at(NOW),
+            None,
+            GRAPH,
+        );
+        assert!(rendered.contains("since 01 May 10:00"), "{rendered}");
+    }
+
+    #[test]
+    fn graph_colors_its_lines_faint_its_nodes_blue_and_closed_deadlines_red() {
+        let rows = vec![(course("104299", "VO X"), exam("E", None, Some(PAST)))];
+        let look = Look {
+            graph: true,
+            color: true,
+        };
+        let rendered = render_exams("Upcoming exams", &rows, at(NOW), None, look);
+        assert!(
+            rendered.starts_with(concat!(
+                "\x1b[90m╭┄\x1b[0m \x1b[1m\x1b[33mUpcoming exams\x1b[0m\n",
+                "\x1b[90m┊╭┄\x1b[0m \x1b[1m\x1b[35m104.299\x1b[0m VO X\n"
+            )),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered.contains("\n\x1b[90m┊\x1b[0m\x1b[1m\x1b[34m•\x1b[0m  \x1b[36mTBA\x1b[0m"),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered.contains("\x1b[31m01 May 10:00\x1b[0m"),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered.ends_with("\x1b[90m┴ 1 exam\x1b[0m\n"),
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn courses_are_one_per_line_when_plain_and_a_graph_under_a_heading_otherwise() {
+        let courses = [course("104299", "VO X"), course("185A91", "VU Y")];
+        assert_eq!(
+            render_courses(&courses, Look::PLAIN),
+            "104.299 VO X\n185.A91 VU Y\n"
+        );
+        let expected = "\
+╭─ Tracked courses
+•  104.299 VO X
+•  185.A91 VU Y
+╰─ 2 courses
+";
+        assert_eq!(render_courses(&courses, GRAPH), expected);
     }
 
     fn data_line(rendered: &str) -> &str {
@@ -640,29 +874,38 @@ TBA        -            104.299 VO Mathemat…
             "\x1b[1m\x1b[33mExam date       \x1b[0m  ",
             "\x1b[1m\x1b[33mRegister by        \x1b[0m  ",
             "\x1b[1m\x1b[33mCourse\x1b[0m\n",
-            "\x1b[33m2026-07-01 10:00\x1b[0m  ",
+            "\x1b[36m2026-07-01 10:00\x1b[0m  ",
             "\x1b[32m2026-09-01 10:00 4w\x1b[0m  ",
-            "\x1b[1m\x1b[34m104.299\x1b[0m VO X\n",
-            "\x1b[33mTBA             \x1b[0m  ",
+            "\x1b[1m\x1b[35m104.299\x1b[0m VO X\n",
+            "\x1b[36mTBA             \x1b[0m  ",
             "\x1b[31m2026-05-01 10:00   \x1b[0m  ",
-            "\x1b[1m\x1b[34m185.A91\x1b[0m VU Y\n",
-            "\x1b[33mTBA             \x1b[0m  ",
+            "\x1b[1m\x1b[35m185.A91\x1b[0m VU Y\n",
+            "\x1b[36mTBA             \x1b[0m  ",
             "\x1b[32m-                  \x1b[0m  ",
-            "\x1b[1m\x1b[34m185.A91\x1b[0m VU Y\n",
+            "\x1b[1m\x1b[35m185.A91\x1b[0m VU Y\n",
         );
-        assert_eq!(render_exams(&rows, at(NOW), None, true), expected);
+        assert_eq!(
+            render_exams("Upcoming exams", &rows, at(NOW), None, COLOR),
+            expected
+        );
     }
 
     #[test]
     fn color_does_not_change_where_a_row_is_cut() {
-        let colored = render_exams(&one_row(LONG_COURSE), at(NOW), Some(44), true);
+        let colored = render_exams(
+            "Upcoming exams",
+            &one_row(LONG_COURSE),
+            at(NOW),
+            Some(44),
+            COLOR,
+        );
         assert!(data_line(&colored).ends_with(" VO Mathemat…"), "{colored}");
     }
 
     #[test]
     fn deadline_exactly_now_is_still_open() {
         let rows = vec![(course("104299", "VO X"), exam("E", None, Some(NOW)))];
-        let colored = render_exams(&rows, at(NOW), None, true);
+        let colored = render_exams("Upcoming exams", &rows, at(NOW), None, COLOR);
         assert!(!colored.contains("\x1b[31m"), "{colored:?}");
     }
 
@@ -672,7 +915,7 @@ TBA        -            104.299 VO Mathemat…
             .iter()
             .map(|&date| (course("104299", "VO X"), exam("E", date, Some(LATER))))
             .collect();
-        render_exams(&rows, at(now), None, false)
+        render_exams("Upcoming exams", &rows, at(now), None, Look::PLAIN)
             .lines()
             .skip(1)
             .map(|line| {
