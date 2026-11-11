@@ -8,7 +8,7 @@ use chrono::{DateTime, Datelike, FixedOffset, TimeDelta};
 use clap::builder::styling::Style;
 
 use crate::ui::{
-    COURSE_NUMBER, EXAM_DATE, FAINT, GRAPH_BOTTOM, GRAPH_TOP, HEADING, Look, NODE,
+    COURSE_NUMBER, EXAM_DATE, FAINT, GRAPH_BOTTOM, GRAPH_BRANCH, GRAPH_TOP, HEADING, Look, NODE,
     REGISTRATION_CLOSED, REGISTRATION_OPEN,
 };
 
@@ -386,10 +386,11 @@ pub fn render_courses(courses: &[Course], look: Look) -> String {
     let top = look.paint(GRAPH_TOP, FAINT);
     let _ = writeln!(out, "{top}{}", look.paint("Tracked courses", HEADING));
     for course in courses {
+        let branch = look.paint(GRAPH_BRANCH, FAINT);
         let node = look.paint("•", NODE);
         let _ = writeln!(
             out,
-            "{node}  {}",
+            "{branch}{node} {}",
             course_text(&course.to_string(), COURSE_NUMBER, look)
         );
     }
@@ -814,8 +815,8 @@ TBA               -                    185.A91 VU Longer
         );
         let expected = "\
 ╭─ Tracked courses
-•  104.299 VO X
-•  185.A91 VU Y
+├─ • 104.299 VO X
+├─ • 185.A91 VU Y
 ╰─ 2 courses
 ";
         assert_eq!(render_courses(&courses, GRAPH), expected);

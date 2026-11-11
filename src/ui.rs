@@ -27,6 +27,8 @@ const FAILED: Style = AnsiColor::Red.on_default().bold();
 
 /// The graph of courses opens with a rounded corner and closes with one.
 pub const GRAPH_TOP: &str = "╭─ ";
+/// Each course hangs on a branch as long as the corners, so its node sits under the heading.
+pub const GRAPH_BRANCH: &str = "├─ ";
 pub const GRAPH_BOTTOM: &str = "╰─ ";
 
 /// Set once by `--simple`, which every message has to follow.
