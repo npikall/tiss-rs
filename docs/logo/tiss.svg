@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="16 8 536 496" width="536" height="496">
+  <title>tiss</title>
+  <!-- palette: ink #1F2A44, accent #F74C00 -->
+  <g fill="none" stroke="#1F2A44" stroke-width="14" stroke-linecap="round" stroke-linejoin="round">
+    <!-- legs -->
+    <path d="M150 420 Q118 428 104 462"/><path d="M178 428 Q154 448 150 482"/>
+    <path d="M410 420 Q442 428 456 462"/><path d="M382 428 Q406 448 410 482"/>
+    <!-- arms -->
+    <path d="M128 352 Q84 330 86 262"/>
+    <path d="M432 352 Q478 334 448 272"/>
+    <!-- claws -->
+    <path d="M108 190 A44 44 0 1 1 62 190 L84 222 Z" fill="#F74C00"/>
+    
+    <!-- spiky shell body -->
+    <path d="M129 372 L107 350 L138 334 L128 308 L164 301 L167 274 L204 277 L220 252 L254 264 L280 244 L306 264 L340 252 L356 277 L393 274 L396 301 L432 308 L422 334 L453 350 L431 372 Q431 428 361 430 L199 430 Q129 428 129 372 Z" fill="#F74C00" stroke-width="16"/>
+    <!-- face -->
+    <circle cx="236" cy="350" r="22" fill="#1F2A44" stroke="none"/>
+    <circle cx="324" cy="350" r="22" fill="#1F2A44" stroke="none"/>
+    <circle cx="229" cy="342" r="8" fill="#fff" stroke="none"/>
+    <circle cx="317" cy="342" r="8" fill="#fff" stroke="none"/>
+    <path d="M262 390 Q280 404 298 390"/>
+    <!-- small calendar held in the right claw: knockout, then card -->
+    <rect x="372" y="60" width="150" height="140" rx="26" stroke="#fff" stroke-width="36" transform="rotate(12 447 130)"/>
+    <g transform="rotate(12 447 130)">
+      <rect x="372" y="60" width="150" height="140" rx="26" fill="#fff"/>
+      <path d="M379 100 L379 90 Q379 67 402 67 L492 67 Q515 67 515 90 L515 100 Z" fill="#F74C00" stroke="none"/>
+      <line x1="379" y1="104" x2="515" y2="104"/>
+      <line x1="414" y1="40" x2="414" y2="80"/><line x1="480" y1="40" x2="480" y2="80"/>
+      <circle cx="447" cy="152" r="20" stroke="#F74C00" stroke-width="11"/>
+      <circle cx="404" cy="152" r="9" fill="#1F2A44" stroke="none"/><circle cx="490" cy="152" r="9" fill="#1F2A44" stroke="none"/>
+    </g>
+    <!-- claw gripping the card -->
+    <path d="M462 190 A44 44 0 1 1 418 190 L440 220 Z" fill="#F74C00"/>
+  </g>
+</svg>

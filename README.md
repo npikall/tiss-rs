@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo/tiss.svg" alt="tiss logo" width="260"></p>
+
 # tiss
 
 Track TU Wien courses and see their exam dates and registration deadlines, using the
