@@ -1,0 +1,49 @@
+# Rewrites the notes of a release that dist's Release workflow published:
+# .github/release-header.md, then GitHub's generated "What's Changed" since the
+# previous tag, then dist's install commands and download table.
+#
+# This is a separate workflow (not a dist custom job) so that dist keeps full
+# ownership of release.yml and `dist generate` never overwrites it.
+name: Release Notes
+
+# workflow_run is needed because dist creates the release with GITHUB_TOKEN,
+# which never triggers `release` events. It is safe here: the job runs only for
+# successful tag pushes in this repo (never fork PRs), checks out the default
+# branch rather than the triggering ref, and treats the tag only as data.
+on:  # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+
+# Deny by default; the job requests only what it needs.
+permissions: {}
+
+# Serialise rewrites of the same tag's notes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  notes:
+    name: Rewrite release notes
+    # Only after a successful tag push in this repo; the Release workflow also runs on PRs.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # edit the release notes
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.workflow_run.head_branch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rewrite release notes
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$TAG" --jq .body > changes.md
+          gh release view "$TAG" --json body --jq .body > dist.md
+          cat .github/release-header.md changes.md dist.md > notes.md
+          gh release edit "$TAG" --notes-file notes.md
