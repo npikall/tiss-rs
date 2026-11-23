@@ -2,6 +2,9 @@
 name = "tiss-rs"
 version = "0.1.0"
 edition = "2024"
+description = "Track TU Wien courses, exam dates and registration deadlines from the terminal"
+repository = "https://github.com/npikall/tiss-rs"
+homepage = "https://github.com/npikall/tiss-rs"
 
 [dependencies]
 anyhow = "1.0.104"
@@ -41,3 +44,8 @@ panic_in_result_fn = "deny"
 panic = "deny"
 exit = "deny"
 as_conversions = "deny"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
